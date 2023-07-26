@@ -1,0 +1,625 @@
+---
+title: "CD3+CD8-_TCR"
+author: "Ming Tang"
+date: '2023-07-26'
+output: html_document
+---
+
+```{r}
+library(readxl)
+library(janitor)
+library(tidyverse)
+library(here)
+library(ggplot2)
+library(ggbeeswarm)
+#install.packages("tcR")
+library(tcR)
+## for cuzick trend test
+library(PMCMRplus)
+```
+
+
+### single-cell TCR data
+
+```{r}
+scTCR_files<- list.files(here("data/TCRdata/cd3_plus_scTCR_renamed"), full.names = TRUE)
+
+read_scTCR<- function(file){
+  scTCR<- read_csv(file)
+  scTCR<- scTCR %>%
+    filter(cdr3 != "None")
+  scTCR$pool_id<- str_replace(basename(file), "_scTCR.csv", "")
+  return(scTCR)
+}
+
+scTCR_data<- map(scTCR_files, read_scTCR)
+scTCR_data<- bind_rows(scTCR_data) %>%
+  dplyr::rename(TCR_pool_id = pool_id)
+```
+
+
+### single-cell RNAseq clustering information for the same cells
+
+This is the cd3+ cd8- space.
+
+```{r}
+cd8_minus_annotated<- readRDS(here("data/cd8_minus_annotated_subcluster7_seurat.rds"))
+
+cd8_minus_meta<- cd8_minus_annotated@meta.data %>%
+   tibble::rownames_to_column(var="cell_barcode") 
+
+cd8_minus_umap<- cd8_minus_annotated[["umap"]]@cell.embeddings
+ 
+cbind(cd8_minus_umap, cd8_minus_meta) %>% write_tsv(here("data/cd8_minus_clean_cluster_annotated_tcr_metadata.tsv"))
+```
+
+
+```{r}
+scRNA_cluster_meta<- read_tsv(here("data/cd8_minus_clean_cluster_annotated_tcr_metadata.tsv"),
+                              guess_max = 10000000)
+
+scRNA_cluster_meta %>% distinct(pool_id, group) %>% pull(group) %>% table()
+```
+
+
+#### TCR beta chain diversity by group 
+
+```{r}
+
+table(scTCR_data$chain)
+
+## some cells (only 115 cells) have multiple TRB, choose the one with most umi count?
+scTCR_data %>%
+  filter(chain == "TRB") %>%
+  count(barcode, v_gene, j_gene, cdr3) %>%
+  arrange(desc(n)) %>%
+  View()
+ 
+## some cells have more TRB clonotypes
+more_TRB<- scTCR_data %>%
+  filter(chain == "TRB") %>%
+  filter(v_gene == "TRBV21-1") %>%
+  count(barcode) %>%
+  filter(n == 2) %>% pull(barcode)
+
+# TRBV21-1 is not productive, the same cell has a different productive TRB
+scTCR_data %>%
+  filter(chain == "TRB") %>%
+  filter(barcode %in% more_TRB) %>%
+  select(barcode, v_gene, j_gene, productive, cdr3, cdr3_nt) %>%
+  arrange(barcode) 
+
+## use distinct for now
+scTCR_TRB<- scTCR_data %>%
+  filter(chain == "TRB") %>%
+  distinct(barcode, v_gene, j_gene, cdr3, .keep_all = TRUE) %>%
+  filter(productive)
+
+## this is by amino acid
+scRNA_cluster_meta2<- scRNA_cluster_meta %>% 
+  inner_join(scTCR_TRB, by = c("cell_barcode" = "barcode")) %>%
+  mutate(cloneType_beta = paste0("clonetype_beta_", group_indices_(., .dots = c('v_gene', 'j_gene', 'cdr3'))))
+
+
+### remove the CD4- cells, clusters 7a,b, 13,16,23
+
+scRNA_cluster_meta2<- scRNA_cluster_meta2 %>%
+  filter(! seurat_clusters %in% c(7,13,16,23))
+
+
+## chao1 diversity
+calculate_diversity<- function(df){
+  df<- df %>%
+    group_by(pool_id) %>%
+    summarize(diversity = chao1(Read.count)[1])
+  return(df)
+}
+
+calculate_invsimp<- function(df){
+  df<- df %>%
+    group_by(pool_id) %>%
+    summarize(diversity = inverse.simpson(Read.count))
+  return(df)
+}
+
+scRNA_tcr_by_group<- scRNA_cluster_meta2 %>% 
+  count(pool_id, cloneType_beta, name = "Read.count") %>%
+  arrange(desc(Read.count))
+
+
+scRNA_tcr_by_group_diversity<- calculate_diversity(scRNA_tcr_by_group)
+
+### some metadata
+scRNA_sample_meta<- scRNA_cluster_meta %>% 
+  select(group, pool_id) %>%
+  distinct()
+
+scRNA_sample_meta$group<- factor(scRNA_sample_meta$group, 
+                                 levels = c("Healthy_donors", "New_C1D1",
+                                            "refractory_CR_C1D1","refractory_PR_C1D1","refractory_PD_C1D1",
+                                            "refractory_CR_C4D1","refractory_PR_C4D1","refractory_PD_C4D1")) 
+
+
+left_join(scRNA_tcr_by_group_diversity, scRNA_sample_meta) %>%
+  write_tsv(here("data/cd8_minus_cd4_plus_diversity_by_group.tsv"))
+
+scRNA_tcr_by_group_diversity<- 
+  left_join(scRNA_tcr_by_group_diversity, scRNA_sample_meta) %>%
+  mutate(group = as.character(group)) %>%
+  mutate(group2 = case_when(
+    str_detect(group, "refractory") ~ "R/R",
+    TRUE ~ group
+  )) %>%
+  mutate(group3 = str_replace(group, "refractory_([A-Z]+)_.+", "\\1")) %>%
+  mutate(group = factor(group, levels = c("Healthy_donors", "New_C1D1",
+                                            "refractory_CR_C1D1","refractory_PR_C1D1","refractory_PD_C1D1",
+                                            "refractory_CR_C4D1","refractory_PR_C4D1","refractory_PD_C4D1"))) %>%
+  mutate(group2 = factor(group2, levels = c("Healthy_donors", "New_C1D1", "R/R"))) %>%
+  mutate(group3 = factor(group3, levels = c("Healthy_donors", "New_C1D1", "CR", "PR", "PD")))
+
+write_csv(scRNA_tcr_by_group_diversity, here("data/20220802_cd8_minus_TRB_chao1_diversity_by_group.csv"))
+ 
+scRNA_tcr_by_group_diversity%>%
+  ggplot(aes(x=group, y = log2(diversity))) +
+  geom_boxplot(aes(fill = group), outlier.colour = NA) +
+  geom_jitter(width = 0.2) +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8))
+ggsave(here("results/figures/scTCR_diversity_by_group.pdf"), width = 6, height = 4)
+
+scRNA_tcr_by_group_diversity%>%
+  ggplot(aes(x=group2, y = log2(diversity))) +
+  geom_boxplot(aes(fill = group2), outlier.colour = NA) +
+  geom_jitter(width = 0.2) +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8))
+ggsave(here("results/figures/scTCR_diversity_by_group2.pdf"), width = 4, height = 4)
+
+scRNA_tcr_by_group_diversity %>%
+  ggplot(aes(x=group3, y = log2(diversity))) +
+  geom_boxplot(aes(fill = group3), outlier.colour = NA) +
+  geom_jitter(width = 0.2) +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8))
+ggsave(here("results/figures/scTCR_diversity_by_group3.pdf"), width = 5, height = 4)
+```
+
+
+Relate to Main Figure 2a
+
+```{r}
+### p-values
+
+scRNA_tcr_by_group_diversity %>%
+  filter(group2 %in% c("Healthy_donors", "New_C1D1", "R/R")) 
+
+wilcox.test(diversity ~ group2, data = scRNA_tcr_by_group_diversity %>%
+  filter(group2 %in% c("Healthy_donors", "New_C1D1")) )
+
+
+wilcox.test(diversity ~ group3, data = scRNA_tcr_by_group_diversity %>%
+  filter(group3 %in% c("New_C1D1", "CR")) )
+
+##  cuzick trend
+cuzickTest(diversity ~ group, data = scRNA_tcr_by_group_diversity %>% 
+  filter(group %in% c("refractory_CR_C1D1", "refractory_PR_C1D1", "refractory_PD_C1D1")) %>%
+  mutate(group = factor(group, levels =c("refractory_CR_C1D1", "refractory_PR_C1D1", "refractory_PD_C1D1"))))
+
+
+cuzickTest(diversity ~ group, data = scRNA_tcr_by_group_diversity %>% 
+  filter(group %in% c("refractory_CR_C4D1", "refractory_PR_C4D1", "refractory_PD_C4D1")) %>%
+  mutate(group = factor(group, levels =c("refractory_CR_C4D1", "refractory_PR_C4D1", "refractory_PD_C4D1"))))
+```
+
+### TCR diversity comparing CR vs PD
+```{r}
+scRNA_sample_meta2<- scRNA_cluster_meta %>% 
+  select(pool_id, tigl_id, bms_subj_id, treatment_cycle, bor_by_irrc_may_2018) %>%
+  distinct()
+
+left_join(scRNA_tcr_by_group_diversity, scRNA_sample_meta2) %>%
+  mutate(log2diversity= log2(diversity)) %>%
+  filter(str_detect(group, "refractory")) %>%
+  ggpaired(
+    x = "treatment_cycle", y = "log2diversity",color = "treatment_cycle",
+    line.color = "gray", line.size = 0.4,id = "bms_subj_id",palette = "npg")+
+  stat_compare_means(label = "p.format", 
+                       method = "wilcox.test", 
+                     method.args = list(alternative = "greater"),
+                     label.y.npc = "bottom",
+                     label.x.npc= "center",
+                       size = 5, paired = TRUE)
+
+left_join(scRNA_tcr_by_group_diversity, scRNA_sample_meta2) %>%
+  mutate(log2diversity= log2(diversity)) %>%
+  filter(str_detect(group, "refractory")) %>%
+  ggpaired(
+    x = "treatment_cycle", y = "log2diversity",color = "treatment_cycle",
+    line.color = "gray", line.size = 0.4,id = "bms_subj_id",palette = "npg") +
+  stat_compare_means(label = "p.format", 
+                       method = "wilcox.test", 
+                     method.args = list(alternative = "greater"),
+                     label.y.npc = "bottom",
+                     label.x.npc= "center",
+                       size = 5, paired = TRUE)
+
+ggsave(here("results/figures/cd8_minus_tcr_diversity_treatment_effect_bulk.pdf"), width = 6, height = 6)
+
+
+left_join(scRNA_tcr_by_group_diversity, scRNA_sample_meta2) %>%
+  mutate(log2diversity= log2(diversity)) %>%
+  filter(str_detect(group, "refractory")) %>%
+  ggpaired(
+    x = "treatment_cycle", y = "log2diversity",color = "treatment_cycle",
+    line.color = "gray", line.size = 0.4,id = "bms_subj_id",palette = "npg")+
+  stat_compare_means(label = "p.format", 
+                       method = "wilcox.test", 
+                     method.args = list(alternative = "greater"),
+                     label.y.npc = "bottom",
+                     label.x.npc= "center",
+                       size = 5, paired = TRUE) +
+  facet_wrap(~ bor_by_irrc_may_2018)
+
+ggsave(here("results/figures/cd8_minus_tcr_diversity_treatment_effect_bulk_by_response.pdf"), width = 12, height = 6)
+```
+
+### TCR beta chain diversity by clusters
+
+Relate to Suppl Figure 5a
+```{r}
+
+calculate_diversity2<- function(df){
+  df<- df %>%
+    group_by(clusters_anno) %>%
+    summarize(diversity = chao1(Read.count)[1])
+  return(df)
+}
+
+
+scRNA_tcr_by_cluster<- scRNA_cluster_meta2 %>%
+  mutate(cluster_anno = clusters_anno_sub) %>%
+  count(clusters_anno, cloneType_beta, name = "Read.count")
+
+scRNA_tcr_by_cluster_diversity<- calculate_diversity2(scRNA_tcr_by_cluster)
+
+ggplot(scRNA_tcr_by_cluster_diversity, aes(x=reorder(clusters_anno, -diversity), y = log2(diversity))) +
+  geom_col() +
+  theme_classic(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  xlab("")
+
+
+
+ggplot(scRNA_tcr_by_cluster_diversity, aes(x=reorder(clusters_anno, -diversity), y = diversity)) +
+  geom_col() +
+  theme_classic(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  xlab("") +
+  ggtitle("chao1 TRB diversity across clusters in CD4 cells")
+
+ggsave(here("results/figures/cd4_diversity_by_cluster.pdf"), width = 8, height = 6)
+
+scRNA_tcr_by_cluster_diversity %>% write_csv(here("data/20220802_cd8_minus_TRB_chao1_diversity_by_cluster.csv"))
+```
+
+
+
+### UMAP plot the diversity score
+
+Relate to Main Figure 1d
+
+```{r}
+library(scattermore)
+scRNA_tcr_seurat<- scRNA_cluster_meta %>%
+  left_join(scRNA_tcr_by_cluster_diversity, by = c("clusters_anno_sub" = "clusters_anno"))
+
+
+ggplot(scRNA_tcr_seurat) +
+geom_scattermore(aes(x=UMAP_1, y = UMAP_2, col = diversity), pointsize=1.2,pixels=c(700,700)) +
+  scale_color_viridis_c() +
+  theme_classic(base_size = 14) +
+  ggtitle("chao1 diversity score on UMAP")
+ggsave(here("results/figures/cd8_minus_diversity_on_UMAP_1.pdf"), width = 8, height =6)
+
+## label the cluster id in the center of the cells
+data2 <- scRNA_tcr_seurat %>% 
+  group_by(clusters_anno_sub) %>% select(UMAP_1, UMAP_2) %>% 
+  summarize_all(mean)
+
+ggplot(scRNA_tcr_seurat) + 
+  geom_scattermore(aes(x=UMAP_1, y = UMAP_2, col = diversity), pointsize=1.2,pixels=c(700,700)) +
+  scale_color_viridis_c() +
+  ggrepel::geom_label_repel(data = data2,aes(x = UMAP_1, y= UMAP_2, label = clusters_anno_sub))+
+  theme_classic(base_size = 14) +
+  ggtitle("chao1 diversity score on UMAP")
+ggsave(here("results/figures/cd8_minus_diversity_on_UMAP_2.pdf"), width = 8, height =6)
+```
+
+
+### TCR beta chain diversity by group by clusters
+
+Relate to supp Figure 5b
+```{r}
+scRNA_cluster_nest<- scRNA_cluster_meta2 %>%
+  mutate(cluster_anno = clusters_anno_sub) %>%
+  group_by(cluster_anno) %>%
+  count(pool_id, cloneType_beta, name = "Read.count") %>%
+  nest(-cluster_anno)
+
+scTCR_diversity_cluster<- scRNA_cluster_nest %>%
+  mutate(diversity = map(data, calculate_diversity)) %>%
+  select(-data) %>%
+  unnest(diversity)
+
+scTCR_diversity_cluster<- left_join(scTCR_diversity_cluster, scRNA_sample_meta2, by = c("pool_id" = "pool_id"))
+write_tsv(scTCR_diversity_cluster, here("data/cd8_minus_scTCR_chao1_diversity_by_cluster_per_sample.tsv"))
+
+
+scTCR_diversity_cluster<- scRNA_cluster_nest %>%
+  mutate(diversity = map(data, calculate_invsimp)) %>%
+  select(-data) %>%
+  unnest(diversity)
+
+
+scTCR_diversity_cluster %>%
+  ggplot(aes(x = group, y = log2(diversity))) +
+  geom_boxplot(aes(fill = group)) +
+  geom_jitter(width = 0.2) +
+  facet_wrap(~cluster_anno) +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8)) +
+  xlab("") +
+  ylab("log2 chao1 diversity")
+
+ggsave("results/figures/cd8_minus_cd4_plus_TCR_chao1_diversity_by_cluster_same_scale.pdf", width = 14, height = 8)
+
+scTCR_diversity_cluster %>%
+  ggplot(aes(x = group, y = diversity)) +
+  geom_boxplot(aes(fill = group)) +
+  geom_jitter(width = 0.2) +
+  facet_wrap(~cluster_anno, scales = "free") +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8)) +
+  xlab("") +
+  ylab("chao1 diversity")
+
+ggsave("results/figures/cd8_minus_TCR_chao1_diversity_by_cluster_nolog2.pdf", width = 14, height = 7)
+
+###################### inverse simpson #############
+scTCR_diversity_cluster %>%
+  ggplot(aes(x = group, y = log2(diversity))) +
+  geom_boxplot(aes(fill = group)) +
+  geom_jitter(width = 0.2) +
+  facet_wrap(~cluster_anno, scales = "free") +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8)) +
+  xlab("") +
+  ylab("log2 inverse simpson diversity")
+
+ggsave("results/figures/TCR_inverse_simpson_diversity_by_cluster.pdf", width = 14, height = 7)
+
+scTCR_diversity_cluster %>%
+  ggplot(aes(x = group, y = diversity)) +
+  geom_boxplot(aes(fill = group)) +
+  geom_jitter(width = 0.2) +
+  facet_wrap(~cluster_anno, scales = "free") +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8)) +
+  xlab("") +
+  ylab("inverse simpson diversity")
+ggsave("results/figures/TCR_inverse_simpson_diversity_by_cluster_nolog2.pdf", width = 14, height = 7)
+```
+
+
+### chao1 diversity p-values
+
+```{r}
+cells_diversity<- scTCR_diversity_cluster
+## pre-treatment
+cells_diversity_nest<- cells_diversity %>% 
+  filter(group %in% c("refractory_CR_C1D1", "refractory_PR_C1D1", "refractory_PD_C1D1")) %>%
+  mutate(group = factor(group, levels =c("refractory_CR_C1D1", "refractory_PR_C1D1", "refractory_PD_C1D1"))) %>%
+  group_by(cluster_anno) %>%
+  nest()
+## post-treatment
+cells_diversity_nest<- cells_diversity %>% 
+  filter(group %in% c("refractory_CR_C4D1", "refractory_PR_C4D1", "refractory_PD_C4D1")) %>%
+  mutate(group = factor(group, levels =c("refractory_CR_C4D1", "refractory_PR_C4D1", "refractory_PD_C4D1"))) %>%
+  group_by(cluster_anno) %>%
+  nest()
+cuzickTest(cells_diversity_nest$data[[1]]$diversity, cells_diversity_nest$data[[1]]$group)
+cells_diversity_nest<- cells_diversity_nest %>%
+  mutate(cuzick_test = map_dbl(data, ~ cuzickTest(.x$diversity, .x$group)$p.value))
+
+
+cells_diversity_nest %>% select(cluster_anno, cuzick_test) %>% View()
+
+### HD vs Newly diagnosed
+cells_diversity_nest<- cells_diversity %>% 
+  filter(group %in% c("Healthy_donors", "New_C1D1")) %>%
+  mutate(group = factor(group, levels =c("Healthy_donors", "New_C1D1"))) %>%
+  group_by(cluster_anno) %>%
+  nest()
+wilcox.test(diversity ~ group, cells_diversity_nest$data[[1]])
+cells_diversity_nest<- cells_diversity_nest %>%
+  mutate(wilcox_test = map_dbl(data, ~ wilcox.test(diversity ~ group, .x)$p.value))
+
+cells_diversity_nest %>% select(cluster_anno, wilcox_test) %>% View()
+```
+
+
+### comparing C1D1 vs C4D1
+
+```{r}
+
+scRNA_sample_meta2<- scRNA_cluster_meta %>% 
+  select(pool_id, bms_subj_id, treatment_cycle, bor_by_irrc_may_2018) %>%
+  distinct()
+
+
+scTCR_diversity_treatment_effect<- scTCR_diversity_cluster %>% 
+  filter(str_detect(group, "refractory")) %>%
+  left_join(scRNA_sample_meta2) 
+
+ggplot(scTCR_diversity_treatment_effect, aes(x = treatment_cycle, y = log2(diversity))) +
+  geom_boxplot(aes(col = treatment_cycle)) +
+  geom_point(aes(col= treatment_cycle), size = 0.5) +
+  geom_line(aes(x= treatment_cycle, group = bms_subj_id), color = "grey") +
+  facet_wrap(~cluster_anno) +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8)) +
+  xlab("")
+
+## use ggpubr
+library(ggpubr)
+
+## use un-paired wilcox-rank sum test, one-side
+ggpaired(scTCR_diversity_treatment_effect %>%
+           mutate(log2diversity = log2(diversity)), x = "treatment_cycle", y = "log2diversity",
+ color = "treatment_cycle", line.color = "gray", line.size = 0.4,
+ id = "bms_subj_id",
+ palette = "npg") +
+facet_wrap(~cluster_anno) +
+  stat_compare_means(label = "p.format", 
+                       method = "wilcox.test", 
+                     method.args = list(alternative = "greater"),
+                     label.y.npc = "bottom",
+                     label.x.npc= "center",
+                       size = 5, paired = FALSE)
+ggsave(here("results/figures/cd8_minus_diversity_by_cluster_treatment_effect.pdf"), width =12, height = 10)
+
+## use paired
+scTCR_diversity_treatment_effect 
+
+ggsave(here("results/figures/cd8_minus_diversity_by_cluster_treatment_effect.pdf"), width =12, height = 10)
+
+
+ggplot(scTCR_diversity_treatment_effect, aes(x = treatment_cycle, y = log2(diversity))) +
+  geom_boxplot(aes(col = treatment_cycle)) +
+  geom_point(aes(col= treatment_cycle), size = 0.5) +
+  geom_line(aes(x= treatment_cycle, group = bms_subj_id), color = "grey") +
+  facet_grid(bor_by_irrc_may_2018 ~ cluster_anno) +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8)) +
+  xlab("") 
+
+ggsave(here("results/figures/cd8_minus_diversity_by_cluster_treatment_effect_by_response.pdf"), width =20, height = 8)
+```
+
+
+### clonal expansion
+
+Relate to Main Figure 1e
+```{r}
+library(scattermore)
+dim(scRNA_cluster_meta2)
+# 121617 cells excluding 7,13,16,23 clusters
+# 126159  inlcuding 7,13,16,23
+
+clone_counts<- scRNA_cluster_meta2 %>%
+  count(pool_id, cloneType_beta, name = "clone_count")
+
+
+scTCR_expansion<- left_join(scRNA_cluster_meta2, clone_counts)
+
+
+
+scTCR_expansion<- scTCR_expansion %>%
+  mutate(expansion_level = case_when(
+    seurat_clusters %in% c(7,13,16,23) ~ NA_character_,
+    clone_count == 1 ~ "singleton",
+    clone_count >1 & clone_count <=5 ~ "expanded",
+    clone_count > 5 ~ "hyperexpanded"
+  ))
+
+
+scTCR_expansion$expansion_level<- factor(scTCR_expansion$expansion_level, levels = c("singleton", "expanded", "hyperexpanded"))
+
+viridis::viridis(n=3)
+library(Polychrome)
+swatch(viridis::viridis(n=3))
+## use only the PD samples 
+scTCR_expansion %>% 
+  ggplot() +
+  geom_scattermore(aes(x=UMAP_1, y = UMAP_2, col = expansion_level), pointsize=1.2,pixels=c(700,700)) +
+  scale_color_viridis_d() +
+  theme_classic(base_size = 14) +
+  facet_wrap(~group) +
+  ggtitle("clonal expansion on UMAP")
+ggsave(here("results/figures/cd8_minus_expansion_on_UMAP_1.pdf"), width = 8, height =6)
+
+scTCR_expansion %>% 
+  ggplot() +
+  geom_scattermore(aes(x=UMAP_1, y = UMAP_2, col = expansion_level), pointsize=1.2,pixels=c(700,700)) +
+  scale_color_manual(values = c("#440154FF", "red", "#FDE725FF")) +
+  theme_classic(base_size = 14) +
+  ggtitle("clonal expansion on UMAP")
+ggsave(here("results/figures/cd8_minus_expansion_on_UMAP_2.pdf"), width = 8, height =6)
+
+scTCR_expansion %>% 
+  ggplot() +
+  geom_scattermore(aes(x=UMAP_1, y = UMAP_2, col = expansion_level), pointsize=1.2,pixels=c(700,700)) +
+  scale_color_manual(values = c("#440154FF", "red", "#FDE725FF"), na.value = "grey") +
+  theme_classic(base_size = 14) +
+  ggtitle("clonal expansion on UMAP")
+
+ggsave(here("results/figures/cd8_minus_expansion_on_UMAP_include_grey_full.pdf"), width = 6, height =4)
+
+
+
+number_of_cells_per_cluster_per_group<-  scTCR_expansion %>%
+  count(group, seurat_clusters, name = "total_cells") 
+
+scTCR_expansion_by_group_cluster<- scTCR_expansion %>%
+  count(group, expansion_level, seurat_clusters) %>%
+  left_join(number_of_cells_per_cluster_per_group) %>%
+  arrange(group, expansion_level, seurat_clusters) %>%
+  mutate(percentage = n/total_cells * 100)
+
+
+write_csv(scTCR_expansion_by_group_cluster, here("data/scTCR_expansion_by_group_by_cluster_cd8_minus_20220721.csv"))
+write_csv(scTCR_expansion, here("data/scTCR_expansion_per_cell_level_cd8_minus_20220721.csv"))
+  
+
+scTCR_expansion_by_group_cluster %>%
+  head()
+
+
+number_of_cells_per_cluster<- scTCR_expansion  %>%
+  count(seurat_clusters, name = "total_cells")
+
+scTCR_expansion %>%
+  count(seurat_clusters, expansion_level) %>%
+  left_join(number_of_cells_per_cluster) %>%
+  mutate(percentage = n/total_cells * 100) %>%
+  write_csv( here("data/scTCR_expansion_by_cluster_cd8_minus_20220721.csv"))
+
+
+scTCR_expansion %>%
+  count(seurat_clusters, expansion_level) %>%
+  left_join(number_of_cells_per_cluster) %>%
+  mutate(percentage = n/total_cells * 100) %>%
+  View()
+```
+
+
+
+

@@ -1,0 +1,409 @@
+---
+title: "create CD3+CD8-"
+author: "Ming Tang"
+date: '2023-07-26'
+output: html_document
+---
+
+
+```{r}
+library(here)
+library(tidyverse)
+library(Seurat)
+library(scattermore)
+```
+
+
+Read in the Seurat object
+
+```{r}
+cd3_plus_annotated<- readRDS(here("data/cd3_plus_annotated_seurat_subcluster.rds"))
+```
+
+### keep cells with 0 count of CD8A and CD8B
+
+exclude B cells (contamination) and red blood cells
+
+```{r}
+cd3_plus_annotated@meta.data$annotation %>% table()
+
+rownames(cd3_plus_annotated) %>% str_subset("CD8")
+(cd3_plus_annotated[["RNA"]]@counts["CD8A", ] == 0) %>% table()
+
+(cd3_plus_annotated[["RNA"]]@counts["CD8B", ] == 0) %>% table()
+
+(cd3_plus_annotated[["RNA"]]@counts["CD8A", ] == 0 & cd3_plus_annotated[["RNA"]]@counts["CD8B", ] == 0) %>% table()
+
+cd8_minus_index<- cd3_plus_annotated[["RNA"]]@counts["CD8A", ] == 0 & cd3_plus_annotated[["RNA"]]@counts["CD8B", ] == 0
+
+(cd3_plus_annotated@meta.data$annotation != "Red_Blood_Cells"  & cd3_plus_annotated@meta.data$annotation != "B_cells") %>% table()
+
+cd8_minus_index2<- cd3_plus_annotated@meta.data$annotation != "Red_Blood_Cells"  & cd3_plus_annotated@meta.data$annotation != "B_cells"
+
+(cd8_minus_index & cd8_minus_index2) %>% table()
+
+cd8_minus_index3<- cd8_minus_index & cd8_minus_index2
+
+cd3_plus_cd8_minus<- cd3_plus_annotated[, cd8_minus_index3]
+
+saveRDS(cd3_plus_cd8_minus, here("results/cd3_plus_cd8_minus.rds"))
+
+cd3_plus_cd8_minus<- readRDS(here("results/cd3_plus_cd8_minus.rds"))
+```
+
+
+### submit a sbatch job.
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=cd8_minus_cluster
+#SBATCH --mem=64G        # total memory need
+#SBATCH -n 4 # 1 core
+#SBATCH -N 1 # on one node
+#SBATCH --time=12:00:00 # DD-HH:MM:SS max walltime(time limit) requested - can use -t 5:00:00 for short
+#SBATCH --error=/liulab/mtang/lsf_logs/lsf_%j_%x.err      # error file
+#SBATCH --output=//liulab/mtang/lsf_logs/lsf_%j_%x.err      # output file
+#SBATCH --mail-type=END,FAIL # email notification when job ends/fails
+#SBATCH --mail-user=mtang@ds.dfci.harvard.edu # email to notify
+
+module load singularity
+
+singularity exec /liulab/mtang/singularity_images/rstudio.simg Rscript cluster_recompute_PCA.R cd3_plus_cd8_minus.rds cd3_plus_cd8_minus_res1.5_recompute_Harmony_HVG.rds
+
+```
+
+### visualize 
+
+```{r}
+
+cd8_minus<- readRDS(here("results/cd3_plus_cd8_minus_res1.5.rds"))
+
+# Free X-Y relate to Supp Figure 1
+cd8_minus_recompute<- readRDS(here("results/cd3_plus_cd8_minus_res1.5_recompute_Harmony_HVG.rds"))
+
+table(cd8_minus@meta.data$seurat_clusters)
+table(cd8_minus_recompute@meta.data$seurat_clusters)
+
+library(scclusteval)
+
+pdf(here("results/figures/cd8_jaccard.pdf"), width = 8, height = 6)
+PairWiseJaccardSetsHeatmap(Idents(cd8_minus), Idents(cd8_minus_recompute))
+dev.off()
+
+DimPlot(cd8_minus, reduction = "umap", group.by = "seurat_clusters",
+        pt.size = .1, label = TRUE, repel = TRUE, order=TRUE, combine = TRUE) +
+  NoLegend()
+
+table(cd8_minus@meta.data$seurat_clusters)
+table(cd3_plus_cd8_minus@meta.data$seurat_clusters)
+
+umap_scattermore<- function(obj, reduction= "umap", col, pointsize=0) {
+  scattermore_df<- cbind(obj@meta.data, Embeddings(obj, reduction = reduction))
+  p<- ggplot(scattermore_df, aes(x= UMAP_1, y= UMAP_2)) + 
+  geom_scattermore(aes(col= .data[[col]]), pointsize = pointsize) +
+  theme_classic(base_size = 14)
+  return(p)
+}
+
+umap_scattermore(cd8_minus, reduction = "umap", col = "seurat_clusters", pointsize = 0.5) +
+  guides(color = guide_legend(override.aes = list(size= 5))) +
+  facet_wrap(~ group, ncol = 5)
+ggsave(here("results/figures/cd8_minus_subcluster_by_group.pdf"), width = 14, height = 6)
+
+
+umap_scattermore(cd8_minus_recompute, reduction = "umap", col = "seurat_clusters", pointsize = 0.5) +
+  guides(color = guide_legend(override.aes = list(size= 5))) +
+  facet_wrap(~ group, ncol = 5)
+ggsave(here("results/figures/cd8_minus_subcluster_by_group_recompute.pdf"), width = 14, height = 6)
+```
+
+
+```{r}
+cd8_minus_recompute<- readRDS(here("results/cd3_plus_cd8_minus_res1.5_recompute_Harmony_HVG.rds"))
+
+#cd8_minus_annotation<- read_tsv(here("data/cd8_minus_annotation.txt"))
+
+#new cluster annotation from Julia
+cd8_minus_annotation<- read_tsv(here("data/cd8_minus__annotations_20210728.txt"))
+cd8_minus_annotation$seurat_clusters<- factor(cd8_minus_annotation$seurat_clusters, levels = as.character(0:32))
+```
+
+
+add Julia's annotation
+
+```{r}
+old_meta<- cd8_minus_recompute@meta.data
+## remove the old annotation.
+old_meta<- dplyr::select(old_meta, - annotation)
+new_meta<- left_join(old_meta, cd8_minus_annotation)
+
+new_meta<- as.data.frame(new_meta)
+rownames(new_meta)<- rownames(old_meta)
+
+cd8_minus_recompute@meta.data<- new_meta
+```
+
+
+### remove the cells that we filter out 
+
+
+```{r}
+indx<- !is.na(cd8_minus_recompute@meta.data$annotation)
+cells_to_keep<- colnames(cd8_minus_recompute)[indx]
+cd8_minus_annotated<- subset(cd8_minus_recompute, cells = cells_to_keep)
+```
+
+### subcluster 7 to 7a and 7b
+
+There is a problem with the Matrix package https://github.com/satijalab/seurat/issues/4436
+
+Relate to Supp Figure 3
+
+```{r}
+cd8_minus_annotated_cluster7<- subset(cd8_minus_annotated, idents = "7")
+
+cd8_minus_annotated_cluster7<- cd8_minus_annotated_cluster7 %>%
+  FindNeighbors(reduction = "harmony", dims = 1:15) %>%
+  FindClusters(resolution = 0.2)
+
+DimPlot(cd8_minus_annotated_cluster7, reduction = "umap", group.by = "seurat_clusters",
+        pt.size = .1, label = TRUE, repel = TRUE, order=TRUE, combine = TRUE) +
+  NoLegend()
+
+ggsave(here("results/figures/cd8minus_subcluster7_umap.pdf"), width = 8, height = 6)
+
+#DimPlot(cd8_minus_annotated_cluster7, reduction = "umap", group.by = "seurat_clusters",
+#        pt.size = .1, label = TRUE, repel = TRUE, order=TRUE, combine = TRUE, split.by = "seurat_clusters") +
+#  NoLegend()
+
+cluster7_idents<- Idents(cd8_minus_annotated_cluster7) 
+  
+cluster7_a<- names(cluster7_idents)[cluster7_idents == 0]
+cluster7_b<- names(cluster7_idents)[cluster7_idents == 1]
+
+cd8_minus_annotated$clusters_anno<- paste0(str_pad(cd8_minus_annotated$seurat_clusters, width = 2, side = "left", pad = "0"), "_", cd8_minus_annotated$annotation)
+
+
+anno_df<- cbind(cd8_minus_annotated@meta.data, barcode = colnames(cd8_minus_annotated)) %>%
+  mutate(seurat_clusters = as.character(seurat_clusters)) %>%
+  mutate(seurat_clusters_sub = case_when(
+    barcode %in% cluster7_a ~ "07_a",
+    barcode %in% cluster7_b ~ "07_b",
+    TRUE ~ seurat_clusters
+  )) %>%
+  mutate(annotation_sub = case_when(
+    barcode %in% cluster7_a ~ "MAIT",
+    barcode %in% cluster7_b ~ "TCRgdVD2",
+    TRUE ~ annotation
+  )) %>%
+  mutate(clusters_anno_sub =  paste0(str_pad(seurat_clusters_sub, width = 2, side = "left", pad = "0"), "_", annotation_sub))
+
+
+table(anno_df$clusters_anno_sub)
+
+cd8_minus_annotated$clusters_anno_sub<- anno_df$clusters_anno_sub
+saveRDS(cd8_minus_annotated, here("data/cd8_minus_annotated_subcluster7_seurat.rds"))
+
+
+cluster7_markers<- presto::wilcoxauc(cd8_minus_annotated_cluster7, 'seurat_clusters', assay = 'data')
+
+cluster7_top_markers<- top_markers(cluster7_markers, n = 20, auc_min = 0.5, pct_in_min = 20)
+
+cluster7_top_markers_unique<- cluster7_top_markers %>%
+  select(-rank) %>% 
+  unclass() %>% 
+  stack() %>%
+  pull(values) %>%
+  unique() %>%
+   .[!is.na(.)]
+```
+
+
+```{r}
+cluster7_mat<- cd8_minus_annotated_cluster7[["RNA"]]@data[cluster7_top_markers_unique, ] %>% as.matrix()
+
+
+## scale the rows
+cluster7_mat<- t(scale(t(cluster7_mat)))
+
+cluster7_cluster_anno<- cd8_minus_annotated_cluster7@meta.data$seurat_clusters
+
+
+quantile(cluster7_mat, c(0.1, 0.5, 0.95))
+
+PurpleAndYellow()
+#col_fun = colorRamp2(c(-1, 0, 2), c("blue", "white", "red"))
+#col_fun = colorRamp2(c(-1, 0, 2), c("#FF00FF", "black", "#FFFF00"))
+
+col_fun<-  circlize::colorRamp2(c(-1, 0, 1.5), c("#440154FF", "#238A8DFF", "#FDE725FF"))
+## for big matrix, raster helps. https://jokergoo.github.io/2020/06/30/rasterization-in-complexheatmap/
+## cluster the slice (without specifiying the factor level) and the columns.
+pdf(here("results/figures/cd8_minus_clusters7_marker_gene_heatmap_cluster.pdf"), width = 12, height = 12)
+Heatmap(cluster7_mat, name = "Expression",  
+        column_split = factor(cluster7_cluster_anno),
+        cluster_columns = TRUE,
+        show_column_dend = FALSE,
+        cluster_column_slices = TRUE,
+        column_title_gp = gpar(fontsize = 12),
+        column_gap = unit(0.5, "mm"),
+        cluster_rows = TRUE,
+        show_row_dend = FALSE,
+        col = col_fun,
+        row_names_gp = gpar(fontsize = 12),
+        column_title_rot = 90,
+        top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = scales::hue_pal()(22)),
+                                           labels_gp = gpar(col = "white", fontsize = 10))),
+        show_column_names = FALSE,
+        use_raster = TRUE,
+        raster_quality = 4)
+dev.off()
+
+# KLRB1 = CD161
+FeaturePlot(cd8_minus_annotated_cluster7, features = c("TRDV2", "TRGV9", "KLRD1", "KLRB1"), order = TRUE)
+ggsave(here("results/figures/cd8_minus_cluster7_featureplot.pdf"), width = 8, height = 4)
+```
+
+
+### cell type percentage by groups
+
+Relate to Main Figure 2b,d,f,g. Supp Figure 6
+
+```{r}
+cd8_minus_annotated<- readRDS(here("data/cd8_minus_annotated_subcluster7_seurat.rds"))
+## total number of cells in the whole cd8- subset
+#number_cells_per_sample<- cd8_minus_annotated@meta.data %>%
+#  group_by(tigl_id) %>%
+#  summarise(total_cells = n()) %>%
+#  ungroup()
+
+## use the total number of cells per sample from the whole cd3+ subset as denominator
+
+cd3_plus_annotated<- readRDS(here("data/cd3_plus_annotated_seurat_subcluster.rds"))
+number_cells_per_sample<- cd3_plus_annotated@meta.data %>%
+  group_by(tigl_id) %>%
+  summarise(total_cells = n()) %>%
+  ungroup()
+
+
+## total 26 clusters
+clusters<- cd8_minus_annotated@meta.data %>% 
+  pull(clusters_anno_sub) %>%
+  unique() %>%
+  sort()
+
+## total 64 samples
+samples<- cd8_minus_annotated@meta.data %>%
+  select(tigl_id, group) %>%
+  distinct() 
+
+## total should be 64 * 26
+cluster_levels<- tidyr::expand_grid(samples, clusters_anno = clusters) %>%
+  mutate(cluster_levels = paste(tigl_id, group, clusters_anno, sep = "|")) %>%
+  pull(cluster_levels)
+
+number_cells_per_seurat_cluster<- cd8_minus_annotated@meta.data %>%
+  mutate(clusters_anno = paste(tigl_id, group, clusters_anno_sub, sep = "|")) %>%
+  mutate(clusters_anno= factor(clusters_anno, levels = cluster_levels )) %>%
+  count(clusters_anno,name = "cells_each_cluster",  .drop = FALSE) %>% 
+  tidyr::separate(col = clusters_anno, into =c("tigl_id", "group", "clusters_anno"), sep = "\\|") 
+
+seurat_cells_percentage<- number_cells_per_seurat_cluster %>%
+  left_join(number_cells_per_sample) %>%
+  mutate(percentage = cells_each_cluster/total_cells) %>%
+  mutate(group = factor(group, levels = c("Healthy_donors", "New_C1D1", "refractory_CR_C1D1","refractory_PR_C1D1", "refractory_PD_C1D1","refractory_CR_C4D1","refractory_PR_C4D1", "refractory_PD_C4D1" )))
+
+seurat_cells_percentage$clusters_anno
+
+write_csv(seurat_cells_percentage, here("results/cd8_minus_seurat_annotated_cluster_percentage_subcluster7_cd3plus_total_denominator.csv"))
+
+
+ggplot(seurat_cells_percentage, aes(x = group, y = percentage)) +
+  geom_boxplot(aes(fill = group), outlier.shape = NA) +
+  geom_jitter(width = 0.2, size = 1) +
+  scale_y_continuous(labels = scales::percent) + 
+  facet_wrap(~clusters_anno, scales = "free") +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8)) +
+  xlab("")
+
+ggsave(here("results/figures/cd8_minus_seurat_annotaed_cluster_percentage_boxplot_fix_0_subcluster7_cells_cd3plus_total_denominator.pdf"), width = 16, height = 10)
+
+ggplot(seurat_cells_percentage, aes(x = group, y = percentage)) +
+  geom_beeswarm(aes(color = group), size = 0.5) +
+  scale_y_continuous(labels = scales::percent) + 
+  facet_wrap(~clusters_anno, scales = "free") +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8)) +
+  xlab("")
+
+
+```
+
+cuzick trend test https://www.rdocumentation.org/packages/PMCMRplus/versions/1.4.4/topics/cuzickTest
+to se if there is a increasing trend in cell percentage in a cluster for pre-CR--> pre-PR -->pre-PD
+
+```{r}
+library(tidyr)
+#install.packages("PMCMRplus")
+library(PMCMRplus)
+seurat_cells_percentage<- read_csv(here("results/cd8_minus_seurat_annotated_cluster_percentage_subcluster7_cd3plus_total_denominator.csv"))
+
+## pre-treatment
+cells_percentage_nest<- seurat_cells_percentage %>% 
+  filter(group %in% c("refractory_CR_C1D1", "refractory_PR_C1D1", "refractory_PD_C1D1")) %>%
+  mutate(group = factor(group, levels =c("refractory_CR_C1D1", "refractory_PR_C1D1", "refractory_PD_C1D1"))) %>%
+  group_by(clusters_anno) %>%
+  nest()
+
+## post-treatment
+cells_percentage_nest<- seurat_cells_percentage %>% 
+  filter(group %in% c("refractory_CR_C4D1", "refractory_PR_C4D1", "refractory_PD_C4D1")) %>%
+  mutate(group = factor(group, levels =c("refractory_CR_C4D1", "refractory_PR_C4D1", "refractory_PD_C4D1"))) %>%
+  group_by(clusters_anno) %>%
+  nest()
+
+cuzickTest(cells_percentage_nest$data[[1]]$percentage, cells_percentage_nest$data[[1]]$group)
+
+cells_percentage_nest<- cells_percentage_nest %>%
+  mutate(cuzick_test = map_dbl(data, ~ cuzickTest(.x$percentage, .x$group)$p.value))
+
+cells_percentage_nest$cuzick_test
+
+View(cells_percentage_nest %>% select(-data)) 
+### healthy donor vs newly diagnosed
+
+cells_percentage_nest<- seurat_cells_percentage %>% 
+  filter(group %in% c("Healthy_donors", "New_C1D1")) %>%
+  mutate(group = factor(group, levels =c("Healthy_donors", "New_C1D1"))) %>%
+  group_by(clusters_anno) %>%
+  nest()
+
+wilcox.test(percentage~ group, data = cells_percentage_nest$data[[1]]) 
+cells_percentage_nest<- cells_percentage_nest %>%
+  mutate(wilcox_test = map_dbl(data, function(x) wilcox.test(percentage ~group, data=x)$p.value))
+
+  
+seurat_cells_percentage %>% 
+  group_by(group, clusters_anno) %>%
+  summarise(median_percentage = median(percentage)) %>%
+  write_tsv(here("data/cd8_minus_seurat_annotated_cluster_median_percentage_subcluster7_cd3plus_total_denominator.csv"))
+
+
+seurat_cells_percentage %>% 
+  distinct(tigl_id, group, total_cells) %>%
+  arrange(group, total_cells) %>%
+  mutate(tigl_id = factor(tigl_id, levels = .$tigl_id) ) %>%
+  ggplot(aes(x= tigl_id, y = total_cells)) +
+  geom_bar(stat ="identity",aes(fill = group)) +theme_classic(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  xlab("")
+
+ggsave(here("results/figures/cd8_minus_final_seurat_obj_cells_number.pdf"), width =12, height = 6)
+
+
+```
+

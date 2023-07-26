@@ -1,0 +1,164 @@
+---
+title: "CD3+ cells"
+author: "Ming Tang"
+date: '2023-07-26'
+output: html_document
+---
+
+```{r}
+library(devtools)
+library(Seurat)
+library(tidyverse)
+library(presto)
+library(here)
+library(tictoc)
+library(ComplexHeatmap)
+# presto is much faster than Seurat::FindAllMarkers
+# install_github('immunogenomics/presto')
+```
+
+
+Read in the Seurat object
+
+```{r}
+cd3_plus_annotated<- readRDS(here("data/cd3_plus_annotated_seurat_subcluster.rds"))
+```
+
+### whole CD3+ subset
+
+
+```{r}
+
+annotation_colors<-c("#3366cc", "#7d5378", "#c83e27", "#e7580c", "#f68104", "#cc9803", "#649710", "#1d8723", "#58455b", "#950395", "#5740ab", "#1882bf", "#427fae", "#a4598a", "#c55660", "#92842c", "#6ba103", "#8e6a17", "#855499", "#814256", "#465a84", "#4e5a96", "#7b4c97", "#7b4c97", "#29aa92", "#b4332b", "#a0aa1b", "#907d56")
+
+# Figure 1a
+DimPlot(cd3_plus_annotated, group.by = "clusters_anno_sub", cols = annotation_colors)
+
+
+# supp Figure 2
+set.seed(123)
+library(ComplexHeatmap)
+
+clusters<- cd3_plus_annotated@meta.data$clusters_anno_sub%>%unique()
+
+markers<- presto::wilcoxauc(cd3_plus_annotated, 'clusters_anno_sub', assay = 'data',
+                               groups_use = clusters)
+
+markers %>% 
+  arrange(desc(auc)) %>% 
+  filter(pct_in> 20, pct_out < 30) %>%
+  head()
+
+top_markers_unique<- filter(markers, padj <=0.05, abs(logFC) >=0.8) %>% 
+  pull(feature) %>%
+  unique()
+
+## for plotting heatmap, subsample the seurat object, 100000 or 5000 cells
+cd3_plus_annotated_sub<- cd3_plus_annotated[, sample.int(ncol(cd3_plus_annotated), size = 10000)]
+
+all_cells<- cd3_plus_annotated_sub@meta.data$clusters_anno_sub %in% clusters
+
+all_mat<- cd3_plus_annotated_sub[["RNA"]]@data[top_markers_unique, all_cells ] %>% as.matrix()
+
+## scale the rows
+all_mat<- t(scale(t(all_mat)))
+
+cluster_anno<- cd3_plus_annotated_sub@meta.data$clusters_anno_sub[all_cells]
+
+column_ha2<- HeatmapAnnotation(
+    cluster_anno = cluster_anno,
+    col = list(cluster_anno = setNames(annotation_colors, sort(clusters))),
+    na_col = "grey",
+    show_annotation_name = TRUE
+)
+
+
+quantile(all_mat, c(0.1, 0.5, 0.95, 0.99))
+
+PurpleAndYellow()
+#col_fun = colorRamp2(c(-1, 0, 2), c("blue", "white", "red"))
+#col_fun = circlize::colorRamp2(c(-1, 0, 2), c("#FF00FF", "black", "#FFFF00"))
+
+col_fun<-  circlize::colorRamp2(c(-1, 0, 2), c("#440154FF", "#238A8DFF", "#FDE725FF"))
+
+## for big matrix, raster helps. https://jokergoo.github.io/2020/06/30/rasterization-in-complexheatmap/
+## cluster the slice (without specifiying the factor level) and the columns.
+
+# can not directly rotate column titles (cluster annotation) for 45, has to use decorate() function, see
+# https://github.com/jokergoo/ComplexHeatmap/issues/189
+
+pdf(here("results/figures/2022-04-14_cd3_plus_all_clusters_marker_gene_heatmap_remake_new_color.pdf"), width = 16, height = 18)
+Heatmap(all_mat, name = "Expression",  
+        column_split = factor(cluster_anno),
+        cluster_columns = TRUE,
+        show_column_dend = FALSE,
+        cluster_column_slices = TRUE,
+        row_dend_reorder = TRUE,
+        column_title_gp = gpar(fontsize = 6),
+        column_title_rot = 90,
+        column_gap = unit(0.5, "mm"),
+        cluster_rows = TRUE,
+        column_dend_reorder = TRUE,
+        show_row_dend = FALSE,
+        col = col_fun,
+        row_km = 20,
+        row_gap = unit(0.5, "mm"),
+        row_title = NULL,
+        row_names_gp = gpar(fontsize = 6),
+        top_annotation = column_ha2,
+        show_column_names = FALSE,
+        use_raster = TRUE,
+        raster_by_magick = TRUE,
+        raster_quality = 10)
+dev.off()
+
+StackedVlnPlot(cd3_plus_annotated, features = top_markers_unique, idents = c(0:25, 27,28))
+ggsave(here("results/figures/cd3_plus_clusters_marker_gene_stacked_violin.pdf"), width = 6, height = 10)
+```
+
+### clustered dotplot 
+
+
+```{r}
+source(here("src/cluster_dotplot.R"))
+
+cd3_genes<- c("IFNG", "IL12A", "LAG3", "CD274", "IL4", "PDCD1", "CCR5", "IL32", "IL10", "HAVCR2", "IRF4", "GZMB", "TBX21", "PRF1", "TGFB1", "KLRG1", "TRGC1", "TRGC2", "TRDC", "B3GAT1", "KLRB1", "RORC", "BCL6", "TNF", "GATA3", "CD44", "CCR4", "IL2RA", "FOXP3", "CD28", "CTLA4", "CD27", "SELL", "CCR7", "CD4", "CD8A", "CD8B", "TRBV30", "TRAV8-2", "TRAV13-1", "TRBV21-1", "TRBV24-1", "TRDV2", "TRGV9", "TRBV11-3", "TRAV16", "TRAV12-1", "TRAV1-2", "ISG15", "IFIT2", "IFIT3", "IFI44L","PMAIP1", "OASL", "ZC3HAV1", "DUSP2", "MAP3K8", "SRGN", "CCL3", "NCR3", "CD247", "FCGR3A", "KLRF1", "FCER1G", "TYROBP", "HCST", "CST7", "NKG7", "CCL5", "GZMA", "CTSW", "GZMM", "HOPX", "CCL4", "KLRD1", "GNLY", "FGFBP2", "GZMH", "NFKBIA", "JUNB", "TNFAIP3", "FOS", "DUSP1", "DDIT4", "FTH1", "ZFP36L2", "LINC02446", "PELI1", "SOX4", "GZMK", "HLA-DMA", "HLA-DQB1", "HLA-DPA1", "HLA-DPB1", "HLA-DRA", "HLA-DRB1", "HLA-DQA1", "CD74", "TXN", "COTL1", "CRIP1", "CD52", "S100A4", "B2M", "PCNA","PCLAF", "TYMS", "STMN1", "DUT", "DEK", "TUBA1B", "TUBB", "HMGN1", "H2AFY", "ANP32B", "NASP", "VIM", "TRDV1", "TRDV3")
+
+cd3_genes[!cd3_genes %in% rownames(cd3_plus_annotated)]
+
+
+clusters<- cd3_plus_annotated$clusters_anno%>%unique()
+cd3_cells<- cd3_plus_annotated$clusters_anno %in% clusters
+
+
+cd3_plus_annotation<- 
+  select(cd3_plus_annotated@meta.data, seurat_clusters, annotation) %>%
+  distinct() %>%
+  mutate(annotation = str_replace_all(annotation, "-", "_")) %>%
+  mutate(annotation = str_replace_all(annotation, "\\+", "")) 
+
+library(Polychrome)
+annotation_colors<- kelly.colors(length(unique(cd3_plus_annotation$annotation))) %>%
+  unname()
+pdf(here("results/figures/cd3_plus_all_dotplot.pdf"), width = 10, height = 24)
+cluster_dot_plot(cd3_plus_annotated[, cd3_cells], features = unique(cd3_genes), annotation = cd3_plus_annotation, annotation_colors = annotation_colors, color_scale_limits = c(-1.5, 2.5))
+dev.off()
+
+
+pdf(here("results/figures/cd3_plus_healthy_only_all_dotplot.pdf"), width = 10, height = 24)
+
+cd3_cells<- cd3_plus_annotated_health$clusters_anno %in% clusters
+
+cluster_dot_plot(cd3_plus_annotated_health[, cd3_cells], features = unique(cd3_genes), annotation = cd3_plus_annotation, annotation_colors = annotation_colors, color_scale_limits = c(-1.5, 2.5))
+dev.off()
+
+
+pdf(here("results/figures/cd3_plus_no_health_all_dotplot.pdf"), width = 10, height = 24)
+
+cd3_cells<- cd3_plus_annotated_no_health$clusters_anno %in% clusters
+cluster_dot_plot(cd3_plus_annotated_no_health[, cd3_cells], features = unique(cd3_genes), annotation = cd3_plus_annotation, annotation_colors = annotation_colors, color_scale_limits = c(-1.5, 2.5))
+dev.off()
+
+
+```
+

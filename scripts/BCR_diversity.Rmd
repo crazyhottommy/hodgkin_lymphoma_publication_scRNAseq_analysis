@@ -1,0 +1,326 @@
+---
+title: "BCR analysis"
+author: "Ming Tang"
+date: '2023-07-26'
+output: html_document
+---
+
+Relate to Main Figure 4f
+
+### focus on BCR first 
+
+we have CD3- and CD3+ subsets. 64 samples each.
+
+for the CD3+ subset, there are B cells in the samples as well (contamination).
+for the CD3- subset, there are T cells in the samples as well.
+
+Let's focus on the CD3- subset first as most of B cells should come from there.
+```{bash}
+
+cd /liulab/mtang/projects/hodgkin_lymphoma_cellranger_output/TRUST4_out
+
+wc -l  ../cd3*
+  64 ../cd3-_pool_ids.txt
+  64 ../cd3+_pool_ids.txt
+ 128 total
+ 
+head ../cd3*
+==> ../cd3-_pool_ids.txt <==
+Pool84_2
+Pool84_4
+Pool84_6
+Pool84_8
+Pool84_18
+Pool84_20
+Pool84_22
+Pool84_24
+Pool84_12
+Pool84_10
+
+==> ../cd3+_pool_ids.txt <==
+Pool84_1
+Pool84_3
+Pool84_5
+Pool84_7
+Pool84_17
+Pool84_19
+Pool84_21
+Pool84_23
+Pool84_11
+Pool84_9
+
+```
+
+
+```{bash}
+mkdir cd3_minus
+mkdir cd3_plus
+
+# move them into seperate folders
+cat ../cd3+_pool_ids.txt | parallel 'mv {}_TRUST4 cd3_plus'
+cat ../cd3-_pool_ids.txt | parallel 'mv {}_TRUST4 cd3_minus'
+```
+
+I rerun TRUST4 v1.0.1 changed the output format.
+I was using v0.2. TRUST4 v1.0 added `contig_id`  column etc.
+
+ perl ../trust-barcoderep-to-10X.pl
+Usage: ./trust-barcoderep-to-10X.pl trust_barcode_report.tsv 10X_report_prefix
+
+```{bash}
+cd /liulab/mtang/projects/hodgkin_lymphoma_cellranger_output/TRUST4_out_v1.0.1/cd3_minus
+
+```
+
+`convert2_10x.sh`
+```{bash}
+#! /bin/bash
+
+set -euo pipefail
+
+prefix=$(echo $1 | cut -d/ -f2)
+perl ../trust-barcoderep-to-10X.pl $1 $prefix
+```
+
+
+```{bash}
+find . -name "*TRUST4_barcode_report.tsv" | parallel './convert2_10x.sh {}'
+```
+
+immunarch is parsing the filename as metadata, **do not use too long filenames with many _**.
+BCR and TCR result will be in separate files. do not use file path name containing **barcode**.
+
+
+```{bash}
+cp *_b.csv /liulab/mtang/projects/hodgkin_lymphoma_scRNAseq/data/cd3_minus_TRUST4_v1.0.1_BCR
+```
+
+ python trust-cluster.py Pool84_10_TRUST4/Pool84_10_TRUST4_cdr3.out
+
+
+#### prefix the tigl_id to the cellbarcode to match the cell barcode in the Seurat object
+
+```{r}
+#cd3_minus_annotated@meta.data %>% 
+#  tibble::rownames_to_column(var="barcode") %>%
+#  write_tsv(here("data/cd3_minus_annotated_seurat_meta.tsv"))
+
+
+## this metadata is at cell level
+cd3_minus_annotated_meta<- read_tsv(here("data/cd3_minus_annotated_seurat_meta.tsv"),
+                                    col_types = cols(.default = col_character()))
+
+head(cd3_minus_annotated_meta$barcode)
+## this metadata is at sample level
+samples_meta<- cd3_minus_annotated_meta %>%
+  select(tigl_id:cohort2, group) %>%
+  distinct(.keep_all = TRUE)
+
+head(samples_meta)
+
+TRUST4_outputs<- list.files(here("data/cd3_minus_TRUST4_v1.0.1_BCR"), full.names = TRUE)
+
+pool_id<- str_replace(TRUST4_outputs, ".+(Pool.+)_TRUST4_b.csv", "\\1")
+tigl_id<- left_join(tibble::tibble(pool_id = pool_id), samples_meta) %>% pull(tigl_id)
+names(TRUST4_outputs)<- tigl_id
+
+TRUST4_outs<- map(TRUST4_outputs, read_csv)
+
+rename_barcode<- function(df, tigl_id){
+  df<- df %>%
+    mutate(barcode = paste(tigl_id, barcode, sep="-")) %>%
+    mutate(barcode = str_replace(barcode, "-1$", ""))
+  return(df)
+}
+
+TRUST4_outs<- purrr::map2(TRUST4_outs, names(TRUST4_outs), ~rename_barcode(df = .x, tigl_id = .y))
+
+dir.create(here("data/cd3_minus_TRUST4_v1.0.1_BCR_renamed"))
+walk2(TRUST4_outs, pool_id, 
+     ~ write_csv(.x, here(paste0("data/cd3_minus_TRUST4_v1.0.1_BCR_renamed/", .y, "_TRUST4_b.csv"))))
+```
+ 
+ 
+
+```{r}
+library(tidyverse)
+library(here)
+cd3_minus_annotated_meta<- read_tsv(here("data/cd3_minus_annotated_seurat_meta.tsv"),
+                                    col_types = cols(.default = col_character()))
+head(cd3_minus_annotated_meta$barcode)
+## this metadata is at sample level
+samples_meta<- cd3_minus_annotated_meta %>%
+  select(tigl_id:cohort2, group) %>%
+  distinct(.keep_all = TRUE)
+```
+
+immunarch is very picky about the name of the files. one should not have `barcode` in the path! (took me a long time to figure it out...)
+
+```{r}
+library(immunarch)
+library(here)
+library(tidyverse)
+library(PMCMRplus)
+
+###### do not use immunarch for importing, we want to filter the cells based on scRNAseq data ####
+# we can try both paired heavy chain and light chain
+# or only heavy chain using .mode = "single"
+#cd3_minus_BCR <- repLoad(here("data/cd3_minus_TRUST4_v1.0.1_BCR_renamed"), .mode = "paired")
+#cd3_minus_BCR <- repLoad(here("data/cd3_minus_TRUST4_v1.0.1_BCR_renamed"), .mode = "single")
+## subset only the heavy chain
+#IGH_indx<- str_detect(cd3_minus_BCR$meta$Chain, "IGH")
+#cd3_minus_BCR$data<- cd3_minus_BCR$data[IGH_indx]
+
+#cd3_minus_BCR$meta<- cd3_minus_BCR$meta[IGH_indx, ]
+#map(cd3_minus_BCR$data, ~ filter(.x, str_detect(V.name, "IGKV1-39")))
+#dplyr::filter(cd3_minus_BCR$data$Pool84_6_TRUST4_b, str_detect(V.name, "IGKV1-39") ) %>% View()
+#View(cd3_minus_BCR$data$Pool87_8_TRUST4_b)
+#map(cd3_minus_BCR$data, ~ filter(.x, str_detect(V.name, "IGKV1D-39")))
+
+
+scBCR_files<- list.files(here("data/cd3_minus_TRUST4_v1.0.1_BCR_renamed"), full.names = TRUE)
+read_scBCR<- function(file){
+  scBCR<- read_csv(file)
+  scBCR<- scBCR %>%
+    filter(cdr3 != "None")
+  scBCR$pool_id<- str_replace(basename(file), "_TRUST4_b.csv", "")
+  scBCR<- left_join(scBCR, samples_meta, by = c("pool_id" = "pool_id"))
+  return(scBCR)
+}
+scBCR_data<- map(scBCR_files, read_scBCR)
+scBCR_data<- bind_rows(scBCR_data) 
+
+write_csv(scBCR_data, here("results/figures/scBCR_TRUST4_out_no_filtering_heavy_and_light_chain.csv"))
+
+## also, only filter the heavy chain and productive clones
+scBCR_heavy<- scBCR_data %>%
+  filter(chain =="IGH") %>% 
+  filter(productive) %>%
+  distinct(barcode, v_gene, j_gene, cdr3, .keep_all = TRUE)  
+
+
+```
+
+
+### remove all the cells without BCR info and retain only cells in the B cell space.
+
+```{r}
+cd3_minus_meta<- read_tsv(here('data/cd3_minus_metadata.tsv'), guess_max = 1000000)
+
+scBCR_heavy<-scBCR_heavy %>%
+  inner_join(cd3_minus_meta %>% select(cell, clusters_anno_sub), by=c("barcode" = "cell"))
+
+scBCR_heavy<- scBCR_heavy %>%
+  mutate(cloneType_heavy = paste0("clonetype_heavy_", group_indices_(., .dots = c('v_gene', 'j_gene', 'cdr3'))))
+
+scBCR_heavy$group<- factor(scBCR_heavy$group, levels = c("Healthy_donors",
+                                                                       "New_C1D1",
+                                                                       "refractory_CR_C1D1",
+                                                                       "refractory_PR_C1D1",
+                                                                       "refractory_PD_C1D1",
+                                                                       "refractory_CR_C4D1",
+                                                                       "refractory_PR_C4D1",
+                                                                       "refractory_PD_C4D1"))
+
+write_csv(scBCR_heavy, here("results/figures/scBCR_productive_heavy_chain_B_cells_only.csv"))
+```
+
+
+### diversity
+
+```{r}
+library(tcR)
+## count unique clonotype
+count_unique_clonotype<- function(df){
+  df<- df %>%
+    count(pool_id)
+  return(df)
+}
+## chao1 diversity
+calculate_diversity<- function(df){
+  df<- df %>%
+    group_by(pool_id) %>%
+    summarize(diversity = chao1(Read.count)[1])
+  return(df)
+}
+
+
+scBCR_heavy_nest<- scBCR_heavy %>% 
+  group_by(group) %>% 
+  count(pool_id, cloneType_heavy, name = "Read.count") %>%
+  nest(-group)
+
+
+scBCR_unique_clonotype<- scBCR_heavy_nest %>%
+  mutate(diversity = map(data, count_unique_clonotype)) %>%
+  select(-data) %>%
+  unnest(diversity)
+
+
+scBCR_diversity<- scBCR_heavy_nest %>%
+  mutate(diversity = map(data, calculate_diversity)) %>%
+  select(-data) %>%
+  unnest(diversity)
+
+```
+
+
+### plotting
+
+
+```{r}
+scBCR_unique_clonotype %>%
+  ggplot(aes(x=group, y = n)) + 
+  geom_boxplot(aes(fill = group), outlier.shape = NA) +
+  geom_point() +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8)) +
+  xlab("") +
+  ylab("unique clonotype") +
+  ggtitle("BCR heavy unique clonotype")
+ggsave(here("results/figures/BCR_unique_clonotype_filtered_BCR_heavy_per_sample.pdf"), width =8, height = 6)
+
+write_csv(scBCR_unique_clonotype,here("results/figures/BCR_unique_clonotype_filtered_BCR_heavy_per_sample.csv"))
+
+scBCR_diversity %>%
+  ggplot(aes(x=group, y = diversity)) + 
+  geom_boxplot(aes(fill = group), outlier.shape = NA) +
+  geom_point() +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8)) +
+  xlab("") +
+  ylab("chao1 index") +
+  ggtitle("chao1 BCR heavy diversity")
+ggsave(here("results/figures/BCR_chao1_filtered_BCR_heavy_per_sample.pdf"), width =8, height = 6)
+
+write_csv(scBCR_diversity, here("results/figures/BCR_chao1_filtered_BCR_heavy_per_sample.csv"))
+
+```
+
+
+```{r}
+cells_per_sample<- scBCR_heavy %>% 
+  count(group, pool_id, name = "total_number_cells")
+
+
+cells_per_sample %>%
+  ggplot(aes(x=group, y = total_number_cells)) + 
+  geom_boxplot(aes(fill = group), outlier.shape = NA) +
+  geom_point() +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8)) +
+  xlab("") +
+  ylab("number of cells") +
+  ggtitle("total number of cells")
+ggsave(here("results/figures/BCR_total_number_cells_BCR_heavy_per_sample.pdf"), width =8, height = 6)
+
+write_csv(cells_per_sample, here("results/figures/BCR_total_number_cells_BCR_heavy_per_sample.csv"))
+```
+
+

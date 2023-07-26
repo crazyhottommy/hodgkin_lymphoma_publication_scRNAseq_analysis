@@ -1,0 +1,1161 @@
+---
+title: "CD3- space"
+author: "Ming Tang"
+date: '2023-07-26'
+output: html_document
+---
+
+cluster_id	annotation	hex
+0	Activated_monocytes	#3366cc
+1	Classical_monocytes	#78537f
+2	Classical-like_monocytes	#be4031
+3	Mature_IgK_B	#e44f0c
+4	Intermediate_monocytes	#f27708
+5	CD56_dim_NK	#ef9802
+6	Mature_IgL_B	#8c970d
+7	Non-classical_monocytes	#2a9615
+8	Terminally_differentiated_NK	#38683f
+9	Memory_B	#722974
+10	Conventional_dendritic	#85129e
+11	CD56_bright_NK	#4553b1
+12	Mature_IgK_V1(D)-39_B	#0692c4
+13	Other_CD14+_PF4+	#5179a8
+14	IFN-responsive_monocytes	#ab5688
+15	Other_low_IgD_B	#c5565f
+17	IFN-responsive_NK	#67a700
+18	Plasmacytoid_dendritic	#897414
+19	Follicular_B	#ab4026
+20a	Other_CD14+_CD79b+	#943a48
+20b	Other_Cytotoxic_monocytes	#943a48
+21	NK/NKT	#5d5172
+22	Activated_non-classical_monocytes	#3a6095
+24	Cytotoxic_monocytes	#8e4698
+
+```{r}
+library(devtools)
+library(Seurat)
+library(tidyverse)
+#library(presto)
+library(here)
+library(tictoc)
+library(ComplexHeatmap)
+# presto is much faster than Seurat::FindAllMarkers
+# install_github('immunogenomics/presto')
+```
+
+
+```{r}
+cd3_minus_annotated<- readRDS(here("data/cd3_minus_annotated_seurat.rds"))
+```
+
+
+### change to the new annotation
+```{r}
+
+table(cd3_minus_annotated$clusters_anno_sub)
+
+old_annotations<- sort(unique(cd3_minus_annotated$clusters_anno_sub))
+new_annotations<- c("00_Activated_monocytes", "01_Classical_monocytes", "02_Classical-like_monocytes", "03_Mature_IgK_B", "04_Intermediate_monocytes",
+                    "05_CD56_dim_NK", "06_Mature_IgL_B", "07_Non-classical_monocytes",
+                    "08_Terminally_differentiated_NK", "09_Memory_B", "10_Conventional_dendritic", "11_CD56_bright_NK", "12_Mature_IgK_V1(D)-39_B", "13_Other_CD14+_PF4+", "14_IFN-responsive_monocytes", "15_Other_low_IgD_B", "17_IFN-responsive_NK", "18_Plasmacytoid_dendritic",
+                    "19_Follicular_B", "20_a_Other_CD14+_CD79b+", "20_b_Other_Cytotoxic_monocytes", "21_NK/NKT",
+                    "22_Activated_non-classical_monocytes", "24_Cytotoxic_monocytes")
+
+names(new_annotations)<- old_annotations
+
+new_annotations
+
+cd3_minus_annotated$clusters_anno_sub<- new_annotations[cd3_minus_annotated$clusters_anno_sub] %>% unname() 
+
+cd3_minus_annotated$annotation<- str_replace(cd3_minus_annotated$clusters_anno_sub,
+                                             "[0-9]+_", "")
+```
+
+### whole cd3- marker gene heatmaps 
+
+Relate to Suppl Figure 10.
+
+```{r}
+set.seed(123)
+library(ComplexHeatmap)
+
+
+clusters<- cd3_minus_annotated@meta.data$clusters_anno_sub%>%unique()
+
+markers<- presto::wilcoxauc(cd3_minus_annotated, 'clusters_anno_sub', assay = 'data',
+                               groups_use = clusters)
+
+markers %>% 
+  arrange(desc(auc)) %>% 
+  filter(pct_in> 20, pct_out < 30) %>%
+  head()
+
+top_markers_unique<- filter(markers, padj <=0.05, abs(logFC) >=0.8) %>% 
+  pull(feature) %>%
+  unique()
+## for plotting heatmap, subsample the seurat object, 100000 or 5000 cells
+cd3_minus_annotated_sub<- cd3_minus_annotated[, sample.int(ncol(cd3_minus_annotated), size = 10000)]
+
+all_cells<- cd3_minus_annotated_sub@meta.data$clusters_anno_sub %in% clusters
+
+all_mat<- cd3_minus_annotated_sub[["RNA"]]@data[top_markers_unique, all_cells ] %>% as.matrix()
+
+## scale the rows
+all_mat<- t(scale(t(all_mat)))
+
+cluster_anno<- cd3_minus_annotated_sub@meta.data$clusters_anno_sub[all_cells]
+
+annotation_colors<- c("#3366cc", "#78537f", "#be4031", "#e44f0c", "#f27708", "#ef9802", "#8c970d", "#2a9615", "#38683f", "#722974", "#85129e", "#4553b1", "#0692c4", "#5179a8", "#ab5688", "#c5565f", "#67a700", "#897414", "#ab4026", "#943a48", "#943a48", "#5d5172", "#3a6095", "#8e4698")
+
+
+
+cluster_anno<- cd3_minus_annotated_sub@meta.data$clusters_anno_sub[all_cells]
+
+column_ha2<- HeatmapAnnotation(
+    cluster_anno = cluster_anno,
+    col = list(cluster_anno = setNames(annotation_colors, sort(clusters))),
+    na_col = "grey",
+    show_annotation_name = TRUE
+)
+
+
+quantile(all_mat, c(0.1, 0.5, 0.95, 0.99))
+
+col_fun<-  circlize::colorRamp2(c(-1, 0, 2), c("#440154FF", "#238A8DFF", "#FDE725FF"))
+
+## for big matrix, raster helps. https://jokergoo.github.io/2020/06/30/rasterization-in-complexheatmap/
+## cluster the slice (without specifiying the factor level) and the columns.
+
+# can not directly rotate column titles (cluster annotation) for 45, has to use decorate() function, see
+# https://github.com/jokergoo/ComplexHeatmap/issues/189
+
+
+pdf(here("results/figures/2023-04-01_cd3_minus_all_clusters_marker_gene_heatmap_remake_new_color.pdf"), width = 16, height = 20)
+Heatmap(all_mat, name = "Expression",  
+        column_split = factor(cluster_anno),
+        cluster_columns = TRUE,
+        show_column_dend = FALSE,
+        cluster_column_slices = TRUE,
+        row_dend_reorder = TRUE,
+        column_title_gp = gpar(fontsize = 8),
+        column_title_rot = 90,
+        column_gap = unit(0.5, "mm"),
+        cluster_rows = TRUE,
+        column_dend_reorder = TRUE,
+        show_row_dend = FALSE,
+        col = col_fun,
+        row_km = 20,
+        row_gap = unit(0.5, "mm"),
+        row_title = NULL,
+        row_names_gp = gpar(fontsize = 4.5),
+        top_annotation = column_ha2,
+        show_column_names = FALSE,
+        use_raster = TRUE,
+        raster_by_magick = TRUE,
+        raster_quality = 10)
+
+dev.off()
+
+```
+
+### Make a function 
+
+```{r}
+
+make_marker_heatmap<- function(obj, annotation_colors, row_km, row_name_size =8){
+  clusters<- obj@meta.data$clusters_anno_sub%>%unique()
+  markers<- presto::wilcoxauc(obj, 'clusters_anno_sub', assay = 'data',
+                               groups_use = clusters)
+  
+  top_markers_unique<- filter(markers, padj <=0.05, abs(logFC) >=0.8) %>% pull(feature) %>%
+  unique()
+## for plotting heatmap, subsample the seurat object, 100000 or 5000 cells
+  obj_sub<- obj[, sample.int(ncol(obj), size = 10000)]
+  all_cells<- obj_sub@meta.data$clusters_anno_sub %in% clusters
+  all_mat<- obj_sub[["RNA"]]@data[top_markers_unique, all_cells ] %>% as.matrix()
+
+## scale the rows
+  all_mat<- t(scale(t(all_mat)))
+  cluster_anno<- obj_sub@meta.data$clusters_anno_sub[all_cells]
+  
+  column_ha2<- HeatmapAnnotation(
+    cluster_anno = cluster_anno,
+    col = list(cluster_anno = setNames(annotation_colors, sort(clusters))),
+    na_col = "grey",
+    show_annotation_name = TRUE
+)
+  
+  col_fun<-  circlize::colorRamp2(c(-1, 0, 2), c("#440154FF", "#238A8DFF", "#FDE725FF"))
+  
+  Heatmap(all_mat, name = "Expression",  
+        column_split = factor(cluster_anno),
+        cluster_columns = TRUE,
+        show_column_dend = FALSE,
+        cluster_column_slices = TRUE,
+        row_dend_reorder = TRUE,
+        column_title_gp = gpar(fontsize = 8),
+        column_title_rot = 90,
+        column_gap = unit(0.5, "mm"),
+        cluster_rows = TRUE,
+        column_dend_reorder = TRUE,
+        show_row_dend = FALSE,
+        col = col_fun,
+        row_km = row_km,
+        row_gap = unit(0.5, "mm"),
+        row_title = NULL,
+        row_names_gp = gpar(fontsize = row_name_size),
+        top_annotation = column_ha2,
+        show_column_names = FALSE,
+        use_raster = TRUE,
+        raster_by_magick = TRUE,
+        raster_quality = 10)
+
+}
+
+```
+
+### NK cells marker gene heatmaps 
+
+Relate to Suppl Figure 11b
+```{r}
+NK_cells_obj<- cd3_minus_annotated[, cd3_minus_annotated$seurat_clusters %in% c(5,8,11,17,21)]
+NK_colors<- c("#ef9802", "#38683f", "#4553b1", "#67a700", "#5d5172")
+
+pdf(here("results/figures/2023-04-01_cd3_minus_NK_marker_gene_heatmap_remake_new_color.pdf"), width = 16, height = 8)
+make_marker_heatmap(obj=NK_cells_obj, annotation_colors = NK_colors, row_km = 5)
+dev.off()
+```
+
+### B cells marker gene heatmaps 
+
+Relate to Suppl Figure 12b
+```{r}
+B_cells_obj<- cd3_minus_annotated[, cd3_minus_annotated@meta.data$clusters_anno_sub%>% str_detect("^03|^06|^09|^12|^15|^19")]
+
+B_colors<- c("#e44f0c", "#8c970d", "#722974", "#0692c4", "#c5565f", "#ab4026")
+
+pdf(here("results/figures/2023-04-01_cd3_minus_B_marker_gene_heatmap_remake_new_color.pdf"), width = 16, height = 8)
+make_marker_heatmap(obj=B_cells_obj, annotation_colors = B_colors, row_km = 6)
+dev.off()
+```
+
+### monocytes marker gene heatmaps 
+
+Relate to Suppl Figure 13
+```{r}
+
+mono_obj<- cd3_minus_annotated[, cd3_minus_annotated@meta.data$clusters_anno_sub%>% str_detect("^00|^01|^02|^04|^07|^10|^14|^18|^20_b|^22|^24")]
+
+mono_colors<- c("#3366cc", "#78537f", "#be4031", "#f27708", "#2a9615", "#85129e", "#ab5688",
+                "#897414", "#943a48", "#3a6095", "#8e4698")
+
+pdf(here("results/figures/2023-04-01_cd3_minus_monocyte_marker_gene_heatmap_remake_new_color.pdf"), width = 16, height = 18)
+make_marker_heatmap(obj=mono_obj, annotation_colors = mono_colors, row_km = 11, row_name_size = 6)
+dev.off()
+
+```
+
+
+### clustered dotplots by group
+
+```{r}
+healthy_indx<- cd3_minus_annotated$group == "Healthy_donors"
+cd3_minus_annotated_no_health<- cd3_minus_annotated[, !healthy_indx]
+cd3_minus_annotated_health<- cd3_minus_annotated[, healthy_indx]
+```
+
+
+### NK cells dotplot
+```{r}
+NK_lineage_markers<- c("NCAM1", "B3GAT1", "FCGR3A")
+NK_cytotoxic_markers<- c("GZMA", "GZMB", "GZMH", "GZMK", "GZMM", "PRF1", "GNLY", "CTSW", "LAMP1")
+NK_cytokine_chemokines<- c("CCL3", "CCL4", "CCL5", "XCL1", "XCL2", "IFNG", "TNF")
+NK_receptors<- c("KLRF1", "NCR1", "NCR3", "KLRK1", "KLRD1", "KLRG1", "KLRB1", "KLRC1",
+                 "KIR2DL1", "KIR2DL2", "KIR2DL3", "KIR3DL1", "KIR3DL2")
+
+NK_adhesion_molecules<- c("CD2", "SELL", "ITGB2", "CD44", "ITGAL")
+NK_TF<- "EOMES"
+NK_INF_genes<- c("IFIT2", "IFIT3", "OASL", "HERC5")
+NK_others<- c("PMAIP1", "COTL1", "LTB","IL7R", "CD8A", "CD8B")
+
+NK_genes<- c(NK_lineage_markers, NK_cytotoxic_markers, NK_cytokine_chemokines,
+             NK_receptors, NK_adhesion_molecules, NK_TF, NK_INF_genes, NK_others)
+
+NK_genes[! NK_genes %in% rownames(cd3_minus_annotated)]
+
+cd3_minus_annotation<- 
+  select(cd3_minus_annotated@meta.data, seurat_clusters, annotation) %>%
+  distinct() %>%
+  mutate(annotation = str_replace_all(annotation, "-", "_")) %>%
+  mutate(annotation = str_replace_all(annotation, "\\+", "")) %>%
+  mutate(seurat_clusters = as.character(seurat_clusters))
+
+```
+
+
+```{r}
+source(here("src/cluster_dotplot_complexheatmap.R"))
+```
+
+### Make dotplot
+
+Relate to Main Figure 3c, Suppl Figure 11c
+
+```{r}
+NK_cells_health<- cd3_minus_annotated_health$seurat_clusters %in% c(5,8,11,17,21) 
+NK_mats_health<- GetMatrixFromSeurat(obj = cd3_minus_annotated_health[, NK_cells_health], features = NK_genes, group.by ="clusters_anno_sub" )
+
+
+NK_cells_no_health<- cd3_minus_annotated_no_health$seurat_clusters %in% c(5,8,11,17,21)
+NK_mats_no_health<- GetMatrixFromSeurat(obj = cd3_minus_annotated_no_health[, NK_cells_no_health], features = NK_genes, group.by ="clusters_anno_sub"  )
+
+
+NK_cells<- cd3_minus_annotated$seurat_clusters %in% c(5,8,11,17,21)
+NK_mats_all<- GetMatrixFromSeurat(obj = cd3_minus_annotated[, NK_cells], features = NK_genes, group.by ="clusters_anno_sub")
+
+
+colnames(NK_mats_health$exp_mat)
+
+colnames(NK_mats_no_health$exp_mat)
+
+library(viridis)
+#Polychrome::swatch(viridis(20))
+#viridis(20)[10]
+
+
+col_fun<-  circlize::colorRamp2(c(-1, 0, 2), c("#440154FF", "#238A8DFF", "#FDE725FF"))
+
+# NK_anno<- left_join(tibble( seurat_clusters = colnames(NK_mats_health$exp_mat)), cd3_minus_annotation) %>%
+#   mutate(cluster_anno = paste0(str_pad(seurat_clusters, width = 2, side = "left", pad = "0"), "_", annotation)) %>%
+#   pull(cluster_anno)
+
+NK_anno<- colnames(NK_mats_health$exp_mat)
+ 
+
+#library(RColorBrewer)
+column_ha1<- HeatmapAnnotation(
+    cluster_anno = NK_anno,
+    col = list(cluster_anno = setNames(c("#ef9802", "#38683f", "#4553b1", "#67a700", "#5d5172"), NK_anno)),
+    na_col = "grey",
+    show_annotation_name = FALSE
+)
+
+column_ha2<- HeatmapAnnotation(
+    cluster_anno = NK_anno,
+    col = list(cluster_anno = setNames(c("#ef9802", "#38683f", "#4553b1", "#67a700", "#5d5172"), NK_anno)),
+    na_col = "grey",
+    show_annotation_name = TRUE
+)
+
+## legend for the dot size
+lgd_list = list(
+    Legend( labels = c(0, 10, 25, 50 , 75, 100), title = "percentage",
+            graphics = list(
+              function(x, y, w, h) grid.circle(x = x, y = y, r = 0  * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.1)  * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.25) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.5) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.75) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = 1 * unit(2, "mm"),
+                                               gp = gpar(fill = "black")))
+            ))
+  
+  
+#### scale across different groups
+
+NK_mats_combine<- cbind(NK_mats_no_health$exp_mat, NK_mats_health$exp_mat, NK_mats_all$exp_mat)
+NK_mats_combine_scaled<- t(scale(t(NK_mats_combine)))
+
+ncol(NK_mats_no_health$exp_mat)
+NK_mats_no_health_scaled<-  NK_mats_combine_scaled[, 1:5]
+NK_mats_health_scaled<-  NK_mats_combine_scaled[, 6:10]
+NK_mats_all_scaled<-  NK_mats_combine_scaled[, 11:15]
+
+quantile(NK_mats_combine_scaled, c(0, 0.1, 0.5, 0.8, 0.9, 0.95, 1))
+set.seed(1234)  
+pdf(here("results/figures/2021_11_07_NK_cells_health_vs_RR_vs_all_scale_across_dotplot_complexheatmap.pdf"), width = 8, height = 9)
+NK_hp1<- MakeClusterDotPlot(exp_mat = NK_mats_no_health_scaled, 
+                   percent_mat = NK_mats_no_health$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "cHLs",
+                   column_title_side = "bottom",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"),
+                   show_row_dend =FALSE,
+                   show_column_dend = FALSE,
+                   column_names_side = "top",
+                   column_names_gp = gpar(fontsize = 10))
+
+NK_hp2<- MakeClusterDotPlot(exp_mat = NK_mats_health_scaled, 
+                   percent_mat = NK_mats_health$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "healthy donors",
+                   column_title_side = "bottom",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"),
+                   row_order = row_order(NK_hp1) %>% unlist(use.names = FALSE),
+                   column_order = column_order(NK_hp1),
+                   column_names_side = "top",
+                   column_names_gp = gpar(fontsize = 10))
+
+
+NK_hp<- MakeClusterDotPlot(exp_mat = NK_mats_all_scaled, 
+                   percent_mat = NK_mats_all$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "all",
+                   column_title_side = "bottom",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"),
+                   row_order = row_order(NK_hp1) %>% unlist(use.names = FALSE),
+                   column_order = column_order(NK_hp1),
+                   column_names_side = "top",
+                   column_names_gp = gpar(fontsize = 10))
+
+draw(NK_hp1 + NK_hp2 + NK_hp , annotation_legend_list = lgd_list, ht_gap = unit(1, "cm") )
+dev.off()
+                   
+```
+
+
+### B cells dotplot 
+
+Relate to Main Figure 4c,  Suppl Figure 12c. 
+
+```{r}
+
+## CD10 is MME, CD20 is MS4A1, CD21 is CR2, CD23 is FCER2, CD138 is SDC1
+immunoglobuin_genes<- c("IGKV1-39", "IGKV1D-39", "IGLC2", "IGLC3", "IGHA1", "IGHG2")
+ontogeny_markers<- c("CD19", "MS4A1", "MME", "CR2", "CD22", "FCER2", "CD24", "CD27", "CD38", "CD79B",  "CXCR5", "TNFRSF13B", "CLECL1", "TCL1A", "IGLL5", "CD72", "MZB1", "PLD4", "ITM2C", "IGKC", "IGKV1-39", "IGLC2", "IGLC3", "IGHD", "IGHM", "IGHA1", "IGHA2", "IGHE", "IGHG1", "IGHG2", "IGHG3", "IGHG4", "CD19", "CD79A", "CD83", "CD69", "CD80", "CD86")
+
+B_others<- c("PPP1R14A", "IGLV2-14", "JCHAIN", "CD82", "VIM", "HLA-C")
+
+B_genes<- c(immunoglobuin_genes, ontogeny_markers, B_others)
+B_genes<- unique(B_genes)
+B_genes[!B_genes %in% rownames(cd3_minus_annotated)]
+
+
+```
+
+
+```{r}
+B_cells_health<- cd3_minus_annotated_health@meta.data$clusters_anno_sub%>% str_detect("^03|^06|^09|^12|^15|^19")
+B_mats_health<- GetMatrixFromSeurat(obj = cd3_minus_annotated_health[, B_cells_health], features = B_genes, group.by = "clusters_anno_sub" )
+
+
+B_cells_no_health<- cd3_minus_annotated_no_health@meta.data$clusters_anno_sub%>% str_detect("^03|^06|^09|^12|^15|^19")
+B_mats_no_health<- GetMatrixFromSeurat(obj = cd3_minus_annotated_no_health[, B_cells_no_health], features = B_genes, group.by = "clusters_anno_sub"  )
+
+
+B_cells<- cd3_minus_annotated@meta.data$clusters_anno_sub%>% str_detect("^03|^06|^09|^12|^15|^19")
+B_mats_all<- GetMatrixFromSeurat(obj = cd3_minus_annotated[, B_cells], features = B_genes, 
+                                 group.by = "clusters_anno_sub" )
+
+
+colnames(B_mats_health$exp_mat)
+rownames(B_mats_health$exp_mat)
+colnames(B_mats_no_health$exp_mat)
+
+col_fun<-  circlize::colorRamp2(c(-1, 0, 2), c("#440154FF", "#238A8DFF", "#FDE725FF"))
+
+B_anno<- colnames(B_mats_health$exp_mat)
+ 
+
+library(RColorBrewer)
+column_ha1<- HeatmapAnnotation(
+    cluster_anno = B_anno,
+    col = list(cluster_anno = setNames(c("#e44f0c", "#8c970d", "#722974", "#0692c4", "#c5565f","#ab4026"), B_anno)),
+    na_col = "grey",
+    show_annotation_name = FALSE
+)
+
+column_ha2<- HeatmapAnnotation(
+    cluster_anno = B_anno,
+    col = list(cluster_anno = setNames(c("#e44f0c", "#8c970d", "#722974", "#0692c4", "#c5565f", "#ab4026"), B_anno)),
+    na_col = "grey",
+    show_annotation_name = TRUE
+)
+
+## legend for the dot size
+lgd_list = list(
+    Legend( labels = c(0, 10, 25, 50 , 75, 100), title = "percentage",
+            graphics = list(
+              function(x, y, w, h) grid.circle(x = x, y = y, r = 0  * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.1)  * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.25) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.5) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.75) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = 1 * unit(2, "mm"),
+                                               gp = gpar(fill = "black")))
+            ))
+  
+  
+set.seed(123)  
+pdf(here("results/figures/2021_11_07_B_cells_health_vs_RR_vs_all_dotplot_complexheatmap.pdf"), width = 10, height = 8)
+B_hp1<- MakeClusterDotPlot(exp_mat = t(scale(t(B_mats_no_health$exp_mat))), 
+                   percent_mat = B_mats_no_health$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "no health",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"))
+
+B_hp2<- MakeClusterDotPlot(exp_mat = t(scale(t(B_mats_health$exp_mat))), 
+                   percent_mat = B_mats_health$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "health",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"),
+                   row_order = row_order(B_hp1) %>% unlist(use.names = FALSE),
+                   column_order = column_order(B_hp1))
+
+B_hp<- MakeClusterDotPlot(exp_mat = t(scale(t(B_mats_all$exp_mat))), 
+                   percent_mat = B_mats_all$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "all",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha2,
+                   legend_dot_size = unit(2, "mm"),
+                   row_order = row_order(B_hp1) %>% unlist(use.names = FALSE),
+                   column_order = column_order(B_hp1))
+
+draw(B_hp1 + B_hp2 + B_hp , annotation_legend_list = lgd_list, ht_gap = unit(1, "cm") )
+dev.off()
+                   
+  
+#### scale across different groups
+
+B_mats_combine<- cbind(B_mats_no_health$exp_mat, B_mats_health$exp_mat, B_mats_all$exp_mat)
+B_mats_combine_scaled<- t(scale(t(B_mats_combine)))
+
+ncol(B_mats_no_health$exp_mat)
+B_mats_no_health_scaled<-  B_mats_combine_scaled[, 1:6]
+B_mats_health_scaled<-  B_mats_combine_scaled[, 7:12]
+B_mats_all_scaled<-  B_mats_combine_scaled[, 13:18]  
+
+set.seed(123)  
+pdf(here("results/figures/2021_11_07_B_cells_health_vs_RR_vs_all_scale_across_dotplot_complexheatmap3.pdf"), width = 10, height = 8.5)
+B_hp1<- MakeClusterDotPlot(exp_mat = B_mats_no_health_scaled, 
+                   percent_mat = B_mats_no_health$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "cHLs",
+                   column_title_side = "bottom",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"),
+                   show_row_dend =FALSE,
+                   show_column_dend = FALSE,
+                   column_names_side = "top",
+                   column_names_gp = gpar(fontsize = 10))
+
+B_hp2<- MakeClusterDotPlot(exp_mat = B_mats_health_scaled, 
+                   percent_mat = B_mats_health$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "healthy donors",
+                   column_title_side = "bottom",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"),
+                   row_order = row_order(B_hp1) %>% unlist(use.names = FALSE),
+                   column_order = column_order(B_hp1),
+                   column_names_side = "top",
+                   column_names_gp = gpar(fontsize = 10))
+
+B_hp<- MakeClusterDotPlot(exp_mat = B_mats_all_scaled, 
+                   percent_mat = B_mats_all$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "all",
+                   column_title_side = "bottom",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha2,
+                   legend_dot_size = unit(2, "mm"),
+                   row_order = row_order(B_hp1) %>% unlist(use.names = FALSE),
+                   column_order = column_order(B_hp1),
+                   column_names_side = "top",column_names_gp = gpar(fontsize = 10))
+
+draw(B_hp1 + B_hp2 + B_hp , annotation_legend_list = lgd_list, ht_gap = unit(1, "cm") )
+dev.off()
+```
+
+
+### Myeloid cells dot plot 
+
+Relate to Main Figure 5c, Suppl Figure 14b
+```{r}
+myeloid_genes<- c("CD14", "FCGR3A", "LYZ", "SIGLEC10", "SIRPA", "CD274", "RPL27A", "RPSA", "IFI6", "ISG15", "IFI44L", "RHOC", "IFITM1", "IFITM2", "IFITM3", "C1QA", "C1QB", "C1QC", "CLEC10A", "FCER1A", "HLA-DQA1", "HLA-DQB1", "HLA-DRB1", "CD74", "HLA-DRA", "HLA-DPA1", "HLA-DPB1", "HLA-DMA", "CCL4", "CCL5", "CTSW", "GZMA", "GNLY", "KLRB1", "NKG7", "GZMH", "GZMM", "KLRD1", "KLRB1", "CD247", "TCF4", "GZMB", "SERPINF1", "SELENOS", "XBP1", "BCL11A", "IRF4", "TRAF4", "SOX4", "PPP1R14B", "IL1RN", "CCL2", "CTSL", "CCL7", "CD63", "BZW1", "FABP5", "JARID2", "THBS1", "CXCL8", "SERPINB2", "PHLDA1", "PID1", "TIMP1", "EREG", "CXCL2", "CXCL3", "IL1B", "IER3", "PRF1")
+
+myeloid_genes<- unique(myeloid_genes)
+
+myeloid_genes[!myeloid_genes %in% rownames(cd3_minus_annotated)]
+
+
+myeloid_cells_health<- cd3_minus_annotated_health@meta.data$clusters_anno_sub%>% str_detect("^00|^01|^02|^04|^07|^10|^14|^18|^20_b|^22|^24")
+myeloid_mats_health<- GetMatrixFromSeurat(obj = cd3_minus_annotated_health[, myeloid_cells_health], features = myeloid_genes, group.by = "clusters_anno_sub" )
+
+
+myeloid_cells_no_health<- cd3_minus_annotated_no_health@meta.data$clusters_anno_sub%>% str_detect("^00|^01|^02|^04|^07|^10|^14|^18|^20_b|^22|^24")
+myeloid_mats_no_health<- GetMatrixFromSeurat(obj = cd3_minus_annotated_no_health[, myeloid_cells_no_health], features = myeloid_genes, group.by = "clusters_anno_sub"  )
+
+myeloid_cells<- cd3_minus_annotated@meta.data$clusters_anno_sub%>% str_detect("^00|^01|^02|^04|^07|^10|^14|^18|^20_b|^22|^24")
+myeloid_mats_all<- GetMatrixFromSeurat(obj = cd3_minus_annotated[, myeloid_cells], features = myeloid_genes, group.by = "clusters_anno_sub"  )
+
+
+all.equal(colnames(myeloid_mats_health$exp_mat), colnames(myeloid_mats_no_health$exp_mat))
+
+
+rownames(myeloid_mats_health$exp_mat)
+colnames(myeloid_mats_no_health$exp_mat)
+
+col_fun<-  circlize::colorRamp2(c(-1, 0, 2), c("#440154FF", "#238A8DFF", "#FDE725FF"))
+
+myeloid_anno<- colnames(myeloid_mats_no_health$exp_mat)
+ 
+
+library(RColorBrewer)
+column_ha1<- HeatmapAnnotation(
+    cluster_anno = myeloid_anno,
+    col = list(cluster_anno = setNames(c("#3366cc", "#78537f", "#be4031", "#f27708","#2a9615",
+                                         "#85129e", "#ab5688", "#897414", "#943a48", "#3a6095",
+                                         "#8e4698"), myeloid_anno)),
+    na_col = "grey",
+    show_annotation_name = FALSE
+)
+
+column_ha2<- HeatmapAnnotation(
+    cluster_anno =myeloid_anno,
+    col = list(cluster_anno = setNames(c("#3366cc", "#78537f", "#be4031", "#f27708","#2a9615",
+                                         "#85129e", "#ab5688", "#897414", "#943a48", "#3a6095",
+                                         "#8e4698"), myeloid_anno)),
+    na_col = "grey",
+    show_annotation_name = TRUE
+)
+
+## legend for the dot size
+lgd_list = list(
+    Legend( labels = c(0, 10, 25, 50 , 75, 100), title = "percentage",
+            graphics = list(
+              function(x, y, w, h) grid.circle(x = x, y = y, r = 0  * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.1)  * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.25) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.5) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.75) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = 1 * unit(2, "mm"),
+                                               gp = gpar(fill = "black")))
+            ))
+  
+  
+set.seed(123)  
+pdf(here("results/figures/myeloid_cells_health_vs_RR_vs_all_dotplot_complexheatmap2.pdf"), width = 12, height = 10)
+myeloid_hp1<- MakeClusterDotPlot(exp_mat = t(scale(t(myeloid_mats_no_health$exp_mat))), 
+                   percent_mat = myeloid_mats_no_health$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "no health",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"))
+
+myeloid_hp2<- MakeClusterDotPlot(exp_mat = t(scale(t(myeloid_mats_health$exp_mat))), 
+                   percent_mat = myeloid_mats_health$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "health",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"),
+                   row_order = row_order(myeloid_hp1) %>% unlist(use.names = FALSE),
+                   column_order = column_order(myeloid_hp1))
+
+myeloid_hp<- MakeClusterDotPlot(exp_mat = t(scale(t(myeloid_mats_all$exp_mat))), 
+                   percent_mat = myeloid_mats_all$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "all",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha2,
+                   legend_dot_size = unit(2, "mm"),
+                   row_order = row_order(myeloid_hp1) %>% unlist(use.names = FALSE),
+                   column_order = column_order(myeloid_hp1))
+
+
+draw(myeloid_hp1 + myeloid_hp2 + myeloid_hp , annotation_legend_list = lgd_list, ht_gap = unit(1, "cm") )
+dev.off()
+
+
+#### scale across different groups
+
+myeloid_mats_combine<- cbind(myeloid_mats_no_health$exp_mat, myeloid_mats_health$exp_mat, myeloid_mats_all$exp_mat)
+myeloid_mats_combine_scaled<- t(scale(t(myeloid_mats_combine)))
+
+ncol(myeloid_mats_no_health$exp_mat)
+myeloid_mats_no_health_scaled<-  myeloid_mats_combine_scaled[, 1:11]
+myeloid_mats_health_scaled<-  myeloid_mats_combine_scaled[, 12:22]
+myeloid_mats_all_scaled<-  myeloid_mats_combine_scaled[, 23:33]  
+
+
+set.seed(12345)  
+pdf(here("results/figures/2021_11_07_myeloid_cells_health_vs_RR_vs_all_scale_across_dotplot_complexheatmap.pdf"), width = 12, height = 12)
+myeloid_hp1<- MakeClusterDotPlot(exp_mat = myeloid_mats_no_health_scaled, 
+                   percent_mat = myeloid_mats_no_health$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "cHLs",
+                   column_title_side = "bottom",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"),
+                   show_row_dend =FALSE,
+                   show_column_dend = FALSE,
+                   column_names_side = "top")
+
+myeloid_hp2<- MakeClusterDotPlot(exp_mat = myeloid_mats_health_scaled, 
+                   percent_mat = myeloid_mats_health$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "healthy donors",
+                   column_title_side = "bottom",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"),
+                   row_order = row_order(myeloid_hp1) %>% unlist(use.names = FALSE),
+                   column_order = column_order(myeloid_hp1),
+                   column_names_side = "top")
+
+myeloid_hp<- MakeClusterDotPlot(exp_mat = myeloid_mats_all_scaled, 
+                   percent_mat = myeloid_mats_all$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "all",
+                   column_title_side = "bottom",
+                   row_km = 4,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha2,
+                   legend_dot_size = unit(2, "mm"),
+                   row_order = row_order(myeloid_hp1) %>% unlist(use.names = FALSE),
+                   column_order = column_order(myeloid_hp1),
+                   column_names_side = "top")
+
+
+draw(myeloid_hp1 + myeloid_hp2 + myeloid_hp , annotation_legend_list = lgd_list, ht_gap = unit(1, "cm") )
+dev.off()
+```
+
+
+
+When all the cells have 0 expression, `scale` will give NaN
+
+```{r}
+# https://stackoverflow.com/questions/15363610/why-does-scale-return-nan-for-zero-variance-columns
+apply(mat, 1, function(y) (y - mean(y)) / sd(y) ^ as.logical(sd(y)))
+```
+
+
+### dot plot for myeloid populations split by groups
+
+borrow some functions from 
+https://github.com/satijalab/seurat/issues/371
+
+```{r}
+
+PrctCellExpringGene <- function(object, genes, group.by = "all"){
+    if(group.by == "all"){
+        prct = unlist(lapply(genes,calc_percentage_helper, object=object))
+        result = data.frame(Markers = genes, Cell_proportion = prct)
+        return(result)
+    }
+
+    else{        
+        list = SplitObject(object, group.by)
+        factors = names(list)
+
+        results = lapply(list, PrctCellExpringGene, genes=genes)
+        for(i in 1:length(factors)){
+        results[[i]]$Feature = factors[i]
+        }
+        combined = do.call("rbind", results)
+        return(combined)
+    }
+}
+
+calc_percentage_helper <- function(object,genes){
+    counts = object[['RNA']]@counts
+    ncells = ncol(counts)
+    if(genes %in% row.names(counts)){
+    sum(counts[genes,]>0)/ncells
+    }else{return(NA)}
+}
+
+
+
+```
+
+```{r}
+PrctCellExpringGene(object = myeloid_cells_no_health_obj, genes = myeloid_genes, group.by = 
+                      "all")
+
+myeloid_cells_no_health<- cd3_minus_annotated_no_health@meta.data$clusters_anno_sub%>% str_detect("^00|^01|^02|^04|^07|^10|^14|^18|^20_b|^22|^24")
+
+myeloid_cells_no_health_obj<- cd3_minus_annotated_no_health[, myeloid_cells_no_health]
+
+
+myeloid_cells<- cd3_minus_annotated@meta.data$clusters_anno_sub%>% str_detect("^00|^01|^02|^04|^07|^10|^14|^18|^20_b|^22|^24")
+
+#PR_cells<- cd3_minus_annotated@meta.data$group %in% c("refractory_PR_C1D1",
+#                                                      "refractory_PR_C4D1")
+
+# also remove healthy donors and newly diagnosed 
+PR_cells<- cd3_minus_annotated@meta.data$group %in% c("refractory_PR_C1D1",
+                                                      "refractory_PR_C4D1",
+                                                      "Healthy_donors",
+                                                      "New_C1D1")
+
+myeloid_cells_obj<- cd3_minus_annotated[, myeloid_cells]
+
+cluster0_cells<- cd3_minus_annotated$seurat_clusters == 0
+cluster0_cells_obj_noPR<- cd3_minus_annotated[, cluster0_cells & !PR_cells]
+  
+```
+
+
+```{r}
+GetMatrixFromSeuratByGroup<- function(obj, features){
+  exp_mat<- obj@assays$RNA@data[features, ]
+  count_mat<- obj@assays$RNA@counts[features, ]
+  
+  meta<- obj@meta.data %>%
+  tibble::rownames_to_column(var = "cell")
+
+  exp_df<- as.matrix(exp_mat) %>% as.data.frame() %>% 
+    tibble::rownames_to_column(var="gene") %>%
+    tidyr::pivot_longer(!gene, names_to = "cell", values_to = "expression") %>%
+    left_join(meta) %>%
+    group_by(gene, clusters_anno_sub, group) %>%
+    summarise(average_expression = mean(expression)) %>%
+    tidyr::pivot_wider(names_from = c(clusters_anno_sub, group), values_from= average_expression,
+                       names_sep="|") 
+  
+  exp_mat<- exp_df[, -1] %>% as.matrix()
+  rownames(exp_mat)<- exp_df %>% pull(gene)
+  
+  count_df<- as.matrix(count_mat) %>% as.data.frame() %>% 
+    tibble::rownames_to_column(var="gene") %>%
+    tidyr::pivot_longer(!gene, names_to = "cell", values_to = "count") %>%
+    left_join(meta) %>%
+    group_by(gene, clusters_anno_sub, group) %>%
+    summarise(percentage = mean(count >0)) %>%
+    tidyr::pivot_wider(names_from = c(clusters_anno_sub, group), values_from= percentage,
+                       names_sep="|") 
+
+  percent_mat<- count_df[, -1] %>% as.matrix()
+  rownames(percent_mat)<- count_df %>% pull(gene)
+  if (!identical(dim(exp_mat), dim(percent_mat))) {
+    stop("the dimension of the two matrice should be the same!")
+  }
+  
+  if(! all.equal(colnames(exp_mat), colnames(percent_mat))) {
+    stop("column names of the two matrice should be the same!")
+  }
+  
+  if(! all.equal(rownames(exp_mat), rownames(percent_mat))) {
+    stop("column names of the two matrice should be the same!")
+  }
+  return(list(exp_mat = exp_mat, percent_mat = percent_mat))
+}
+
+```
+
+Relate to Main Figure 6a
+
+```{r}
+mats<- GetMatrixFromSeuratByGroup(myeloid_cells_no_health_obj, features = myeloid_genes)
+
+mats$exp_mat
+
+mats$percent_mat
+
+mats<- GetMatrixFromSeuratByGroup(myeloid_cells_no_health_obj, features = myeloid_genes)
+
+mats<- GetMatrixFromSeuratByGroup(myeloid_cells_obj, features = myeloid_genes)
+
+
+PD_up_genes<- c("CSF2", "IL6", "CXCL5", "CXCL1", "CCL20", "CCL3", "CXCL3", "CCL4",
+                "IL1B", "IL1A", "CXCL2", "CCL2", "CXCL8")
+
+mats<- GetMatrixFromSeuratByGroup(cluster0_cells_obj_noPR, 
+                                  features = PD_up_genes )
+mats$exp_mat
+```
+
+
+
+```{r}
+source(here("src/cluster_dotplot_complexheatmap.R"))
+
+col_fun<-  circlize::colorRamp2(c(-1, 0, 1.5), c("#440154FF", "#238A8DFF", "#FDE725FF"))
+
+colnames(mats$exp_mat)
+quantile(scale(t(mats$exp_mat)), c(0.1, 0.2, 0.5, 0.9, 0.95))
+
+annotation_df<- colnames(mats$exp_mat) %>%
+  as_tibble() %>%
+  separate(value, into= c("cluster", "group"), sep= "\\|") %>%
+  mutate(treatment_cycle = str_replace(group, ".+(C[14]D1)", "\\1" )) %>%
+  mutate(response = str_replace(group, ".+(CR|PD).+", "\\1")) %>%
+  mutate(treatment_cycle = if_else(treatment_cycle=="Healthy_donors",NA_character_, treatment_cycle)) %>%
+  mutate(response = if_else(response=="Healthy_donors",NA_character_, response)) %>%
+  mutate(response = if_else(response=="New_C1D1",NA_character_, response))
+  
+  
+column_ha<- HeatmapAnnotation(
+    df = as.data.frame(annotation_df),
+    col = list(cluster = setNames(brewer.pal(length(unique(annotation_df$cluster)), "Set3"), unique(annotation_df$cluster)),
+               group = setNames(scales::hue_pal()(length(unique(annotation_df$group))), unique(annotation_df$group)),
+               treatment_cycle = c("C1D1" = "brown", "C4D1" = "purple"),
+               response = c("CR"= "red", "PD" = "blue")
+    ),
+    na_col = "grey"
+)
+draw(column_ha)
+
+column_ha1<- HeatmapAnnotation(
+    df = as.data.frame(annotation_df),
+    col = list(cluster = c("00_Activated_monocytes" = "#00563F"),
+               group = setNames(scales::hue_pal()(length(unique(annotation_df$group))), unique(annotation_df$group)),
+               treatment_cycle = c("C1D1" = "brown", "C4D1" = "purple"),
+               response = c("CR"= "red", "PD" = "blue")
+    ),
+    na_col = "grey"
+)
+
+draw(column_ha1)
+
+
+library(RColorBrewer)
+
+
+colnames(mats$exp_mat)
+
+pdf(here("results/figures/2021-11-19_myeloid_dotplot_by_group_cluster0_cHL.pdf"), width = 6, height = 3.5)
+cluster0_dotplot<- MakeClusterDotPlot(exp_mat = t(scale(t(mats$exp_mat)))[PD_up_genes,], percent_mat = mats$percent_mat[PD_up_genes,] *100,
+                   col_fun = col_fun,
+                   column_labels = colnames(mats$exp_mat) %>% str_replace("(^[0-9]+)_.+", "\\1"),
+                   cluster_columns = FALSE,
+                   cluster_rows = FALSE,
+                   column_title = "cHL",
+                   column_title_side = "bottom",
+                   row_km = NULL,
+                   row_names_font_size = 7, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"),
+                   show_row_dend =FALSE,
+                   show_column_dend = FALSE,
+                   column_names_side = "top")
+
+draw(cluster0_dotplot , annotation_legend_list = lgd_list, ht_gap = unit(1, "cm") )
+dev.off()
+```
+
+
+### cell type percentage by groups
+
+Relate to Main Figure 4e, Figure 11d, 12d, 14c
+
+
+some samples for some small clusters do not have any cells and this will not be computed when group_by. and some clusters disappear in PD, the percentage of those clusters should be 0.
+
+The solution is to get all factor levels by `expand` and use `.drop =FALSE` when `count`
+
+```{r}
+
+number_cells_per_sample<- cd3_minus_annotated@meta.data %>%
+  group_by(tigl_id) %>%
+  summarise(total_cells = n()) %>%
+  ungroup()
+
+
+## total 24 clusters
+clusters<- cd3_minus_annotated@meta.data %>% 
+  pull(clusters_anno_sub) %>%
+  unique() %>%
+  sort()
+
+## total 64 samples
+samples<- cd3_minus_annotated@meta.data %>%
+  select(tigl_id, group) %>%
+  distinct() 
+
+## total should be 64 * 23 =1600
+cluster_levels<- tidyr::expand_grid(samples, clusters_anno = clusters) %>%
+  mutate(cluster_levels = paste(tigl_id, group, clusters_anno, sep = "|")) %>%
+  pull(cluster_levels)
+
+number_cells_per_seurat_cluster<- cd3_minus_annotated@meta.data %>%
+  mutate(clusters_anno = paste(tigl_id, group, clusters_anno_sub, sep = "|")) %>%
+  mutate(clusters_anno= factor(clusters_anno, levels = cluster_levels )) %>%
+  count(clusters_anno,name = "cells_each_cluster",  .drop = FALSE) %>% 
+  tidyr::separate(col = clusters_anno, into =c("tigl_id", "group", "clusters_anno"), sep = "\\|") 
+
+seurat_cells_percentage<- number_cells_per_seurat_cluster %>%
+  left_join(number_cells_per_sample) %>%
+  mutate(percentage = cells_each_cluster/total_cells) %>%
+  mutate(group = factor(group, levels = c("Healthy_donors", "New_C1D1", "refractory_CR_C1D1","refractory_PR_C1D1", "refractory_PD_C1D1","refractory_CR_C4D1","refractory_PR_C4D1", "refractory_PD_C4D1" )))
+
+seurat_cells_percentage$clusters_anno
+
+write_csv(seurat_cells_percentage, here("results/cd3_minus_seurat_annotated_cluster_percentage_subcluster20.csv"))
+
+### only for cluster0
+
+seurat_cells_percentage %>%
+  filter(clusters_anno == "00_Activated_monocytes_macrophages") %>%
+  arrange(group, cells_each_cluster) %>% 
+  mutate(cells_each_cluster = as.numeric(cells_each_cluster)) %>%
+  mutate(tigl_id = factor(tigl_id, levels = tigl_id)) %>%
+  ggplot(aes(x= tigl_id, y = cells_each_cluster)) +
+  geom_col(aes(fill = group)) +
+  geom_hline(yintercept = 200, linetype = 2, color = "red") +
+  theme_classic(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  ylab("cell number in cluster0 mon/mac") +
+  xlab("")
+ggsave(here("results/figures/cluster0_cellnumber.pdf"), width = 10, height = 6)
+
+seurat_cells_percentage %>%
+  filter(clusters_anno == "00_Activated_monocytes_macrophages") %>%
+  arrange(group, cells_each_cluster) %>% 
+  mutate(tigl_id = factor(tigl_id, levels = tigl_id)) %>%
+  ggplot(aes(x= tigl_id, y = percentage)) +
+  geom_col(aes(fill = group)) +
+  geom_hline(yintercept = 0.2, linetype = 2, color = "red") +
+  theme_classic(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  xlab("")
+
+ggsave(here("results/figures/cluster0_percentage.pdf"), width = 10, height = 6)
+#############
+
+
+ggplot(seurat_cells_percentage, aes(x = group, y = percentage)) +
+  geom_boxplot(aes(fill = group), outlier.shape = NA) +
+  geom_jitter(width = 0.2, size = 1) +
+  scale_y_continuous(labels = scales::percent) + 
+  facet_wrap(~clusters_anno, scales = "free") +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8)) +
+  xlab("")
+
+ggplot(seurat_cells_percentage, aes(x = group, y = percentage)) +
+  geom_beeswarm(aes(color = group), size = 0.5) +
+  scale_y_continuous(labels = scales::percent) + 
+  facet_wrap(~clusters_anno, scales = "free") +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8)) +
+  xlab("")
+
+ggsave(here("results/figures/cd3_minus_seurat_annotaed_cluster_percentage_boxplot_fix_0_subcluster20_cells.pdf"), width = 16, height = 10)
+```
+
+cuzick trend test https://www.rdocumentation.org/packages/PMCMRplus/versions/1.4.4/topics/cuzickTest
+to se if there is a increasing trend in cell percentage in a cluster for pre-CR--> pre-PR -->pre-PD
+
+```{r}
+library(tidyr)
+#install.packages("PMCMRplus")
+library(PMCMRplus)
+seurat_cells_percentage<- read_csv(here("results/cd3_minus_seurat_annotated_cluster_percentage_subcluster20.csv"))
+
+## pre-treatment
+cells_percentage_nest<- seurat_cells_percentage %>% 
+  filter(group %in% c("refractory_CR_C1D1", "refractory_PR_C1D1", "refractory_PD_C1D1")) %>%
+  mutate(group = factor(group, levels =c("refractory_CR_C1D1", "refractory_PR_C1D1", "refractory_PD_C1D1"))) %>%
+  group_by(clusters_anno) %>%
+  nest()
+
+## post-treatment
+cells_percentage_nest<- seurat_cells_percentage %>% 
+  filter(group %in% c("refractory_CR_C4D1", "refractory_PR_C4D1", "refractory_PD_C4D1")) %>%
+  mutate(group = factor(group, levels =c("refractory_CR_C4D1", "refractory_PR_C4D1", "refractory_PD_C4D1"))) %>%
+  group_by(clusters_anno) %>%
+  nest()
+
+cuzickTest(cells_percentage_nest$data[[1]]$percentage, cells_percentage_nest$data[[1]]$group)
+
+cells_percentage_nest<- cells_percentage_nest %>%
+  mutate(cuzick_test = map_dbl(data, ~ cuzickTest(.x$percentage, .x$group)$p.value))
+
+cells_percentage_nest$cuzick_test
+
+View(cells_percentage_nest %>% select(-data)) 
+### healthy donor vs newly diagnosed
+
+cells_percentage_nest<- seurat_cells_percentage %>% 
+  filter(group %in% c("Healthy_donors", "New_C1D1")) %>%
+  mutate(group = factor(group, levels =c("Healthy_donors", "New_C1D1"))) %>%
+  group_by(clusters_anno) %>%
+  nest()
+
+wilcox.test(percentage~ group, data = cells_percentage_nest$data[[1]]) 
+cells_percentage_nest<- cells_percentage_nest %>%
+  mutate(wilcox_test = map_dbl(data, function(x) wilcox.test(percentage ~group, data=x)$p.value))
+
+  
+seurat_cells_percentage %>% 
+  group_by(group, clusters_anno) %>%
+  summarise(median_percentage = median(percentage)) %>%
+  write_tsv(here("data/cd3_minus_seurat_annotated_cluster_median_percentage_subcluster20.csv"))
+
+
+seurat_cells_percentage %>% 
+  distinct(tigl_id, group, total_cells) %>%
+  arrange(group, total_cells) %>%
+  mutate(tigl_id = factor(tigl_id, levels = .$tigl_id) ) %>%
+  ggplot(aes(x= tigl_id, y = total_cells)) +
+  geom_bar(stat ="identity",aes(fill = group)) +theme_classic(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  xlab("")
+
+ggsave(here("results/figures/cd3_minus_final_seurat_obj_cells_number.pdf"), width =12, height = 6)
+
+
+seurat_cells_percentage %>%
+  filter(str_detect(clusters_anno,"B_cell")) %>%
+  filter(group == "refractory_PD_C1D1") %>%
+  arrange(clusters_anno) %>% View()
+```
+
+
+
+
+
+
+

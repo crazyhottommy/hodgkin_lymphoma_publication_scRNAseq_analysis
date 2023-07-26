@@ -1,0 +1,719 @@
+---
+title: "CD3+CD8- space"
+author: "Ming Tang"
+date: '2023-07-26'
+output: html_document
+---
+
+### heatmap for the full CD3+/CD8- space 
+
+Related to Supplementary Figure 2
+
+```{r}
+library(devtools)
+library(Seurat)
+library(tidyverse)
+library(presto)
+library(here)
+library(tictoc)
+library(ComplexHeatmap)
+```
+
+```{r}
+set.seed(123)
+# this is the updated Seurat object removing cluster25 and subcluster 7 to 7a and 7b
+cd8_minus_annotated<- readRDS(here("data/cd8_minus_annotated_subcluster7_seurat.rds"))
+
+table(cd8_minus_annotated$clusters_anno_sub)
+```
+
+new annotation:
+
+cluster_id	annotation	hex
+0	Naïve	#3366cc
+1	Naïve/Tcm	#974b5d
+2	CXCL13+	#e24b0e
+3	Th2	#f78402
+4	Other	#a59709
+5	CD4+_CTL_(GZMB+)	#179616
+6	Th17-like	#5d4160
+7a	MAIT	#8117a0
+7b	TCRgdVD2	#8117a0
+8	IFN-responsive	#2672ba
+9	Naïve/Tcm	#4c7aaa
+10	Treg	#cf497b
+11	Naïve/Tcm_(TRBV30)	#9d7a37
+12	Naïve/Tcm_(TRAV8-2)	#709a04
+13	TCRgd_non-VD2	#9f5024
+14	Other_exhausted	#8d3e4e
+15	Naïve/Tcm	#3d5e8a
+16	NK/NKT	#655397
+17	Tr1	#8d4e99
+18	Naïve/Tcm_(SOX4+)	#468a99
+19	Other_exhausted	#48aa72
+20	CD4+_CTL_(GZMB-)	#99a923
+21	Naïve/Tcm	#8a7066
+22	IFN-responsive_cytotoxic	#6d37bf
+23	TCRgdVD2	#ba5d46
+24	Naïve/Tcm	#cf5800
+
+
+```{r}
+old_annotations<- sort(unique(cd8_minus_annotated$clusters_anno_sub))
+
+new_annotations<- c("00_naive", "01_naive_Tcm", "02_CXCL13+", "03_Th2", "04_Other",
+                    "05_CD4+_CTL_GZMB+", "06_Th17-like", "07_a_MAIT", "07_b_TCRgdVD2",
+                    "08_IFN-responsive", "09_naive_Tcm", "10_Treg", "11_Naive_Tcm_TRBV30", "12_Naive_Tcm_TRAV8-2", "13_TCRgd_non-VD2", "14_Other_exhausted", "15_naive_Tcm", "16_NK_NKT", "17_Tr1", "18_naive_Tcm_SOX4",
+                    "19_cycling", "20_CD4+_CTL_GZMB-", "21_naive_Tcm",
+                    "22_IFN-responsive_cytotoxic", "23_TCRgdVD2", "24_naive_Tcm")
+
+### this is the same hex color as in the BBrowser.
+annotation_colors<- c("#3366cc", "#974b5d", "#e24b0e", "#f78402", "#a59709", "#179616", "#5d4160", "#8117a0", "#8117a0", "#2672ba", "#4c7aaa", "#cf497b", "#9d7a37", "#709a04", "#9f5024", "#8d3e4e", "#3d5e8a", "#655397", "#8d4e99", "#468a99", "#48aa72", "#99a923", "#8a7066", "#6d37bf", "#ba5d46", "#cf5800")
+
+names(new_annotations)<- old_annotations
+
+new_annotations
+
+cd8_minus_annotated$clusters_anno_sub<- new_annotations[cd8_minus_annotated$clusters_anno_sub] %>% unname() 
+
+cd8_minus_annotated$annotation<- str_replace(cd8_minus_annotated$clusters_anno_sub,
+                                             "[0-9]+_", "")
+```
+
+Main Figure 1a 
+
+```{r}
+DimPlot(cd8_minus_annotated, group.by = "clusters_anno_sub", cols = annotation_colors)
+```
+
+
+Related to Supplementary Figure 2
+```{r}
+clusters<- cd8_minus_annotated$clusters_anno_sub%>%unique()
+markers<- presto::wilcoxauc(cd8_minus_annotated, 'clusters_anno_sub', assay = 'data',
+                               groups_use = clusters)
+
+top_markers_unique<- filter(markers, padj <=0.05, abs(logFC) >=0.8) %>% 
+  pull(feature) %>%
+  unique()
+
+
+set.seed(123)
+## for plotting heatmap, subsample the seurat object, 100000 or 5000 cells
+cd8_minus_annotated_sub<- cd8_minus_annotated[, sample.int(ncol(cd8_minus_annotated), size = 10000)]
+
+clusters<- cd8_minus_annotated_sub$clusters_anno_sub%>%unique()
+all_cells<- cd8_minus_annotated_sub@meta.data$clusters_anno_sub %in% clusters
+
+all_mat<- cd8_minus_annotated_sub[["RNA"]]@data[top_markers_unique, all_cells ] %>% as.matrix()
+
+## scale the rows
+all_mat<- t(scale(t(all_mat)))
+
+quantile(all_mat, c(0.1, 0.5, 0.95))
+
+col_fun<-  circlize::colorRamp2(c(-1, 0, 2), c("#440154FF", "#238A8DFF", "#FDE725FF"))
+
+cluster_anno<- cd8_minus_annotated_sub@meta.data$clusters_anno_sub[all_cells]
+
+column_ha2<- HeatmapAnnotation(
+    cluster_anno = cluster_anno,
+    col = list(cluster_anno = setNames(annotation_colors, sort(clusters))),
+    na_col = "grey",
+    show_annotation_name = TRUE
+)
+
+
+pdf(here("results/figures/2022-04-14_cd3_plus_cd8_minus_all_clusters_marker_gene_heatmap_remake_new_color.pdf"), width = 12, height = 18)
+Heatmap(all_mat, name = "Expression",  
+        column_split = factor(cluster_anno),
+        cluster_columns = TRUE,
+        show_column_dend = FALSE,
+        cluster_column_slices = TRUE,
+        column_title_gp = gpar(fontsize = 6),
+        column_title_rot = 90,
+        column_gap = unit(0.5, "mm"),
+        cluster_rows = TRUE,
+        row_km = 20,
+        row_gap = unit(0.5, "mm"),
+        show_row_dend = FALSE,
+        row_title = NULL,
+        col = col_fun,
+        row_names_gp = gpar(fontsize = 5),
+        top_annotation = column_ha2,
+        show_column_names = FALSE,
+        use_raster = TRUE,
+        raster_quality = 10)
+
+dev.off()
+```
+
+### clustered dotplot using complexheatmap
+
+Relate to Main Figure 1c and Supp Figure 4
+
+```{r}
+## remove the healthy donors
+healthy_indx<- cd8_minus_annotated$group == "Healthy_donors"
+cd8_minus_annotated_no_health<- cd8_minus_annotated[, !healthy_indx]
+cd8_minus_annotated_health<- cd8_minus_annotated[, healthy_indx]
+
+```
+
+
+```{r}
+source(here("src/cluster_dotplot_complexheatmap.R"))
+
+cd3_genes<- c("IFNG", "IL12A", "LAG3", "CD274", "IL4", "PDCD1", "CCR5", "IL32", "IL10", "HAVCR2", "IRF4", "GZMB", "TBX21", "PRF1", "TGFB1", "KLRG1", "TRGC1", "TRGC2", "TRDC", "B3GAT1", "KLRB1", "RORC", "BCL6", "TNF", "GATA3", "CD44", "CCR4", "IL2RA", "FOXP3", "CD28", "CTLA4", "CD27", "SELL", "CCR7", "CD4", "CD8A", "CD8B", "TRBV30", "TRAV8-2", "TRAV13-1", "TRBV21-1", "TRBV24-1", "TRDV2", "TRGV9", "TRBV11-3", "TRAV16", "TRAV12-1", "TRAV1-2", "ISG15", "IFIT2", "IFIT3", "IFI44L","PMAIP1", "OASL", "ZC3HAV1", "DUSP2", "MAP3K8", "SRGN", "CCL3", "NCR3", "CD247", "FCGR3A", "KLRF1", "FCER1G", "TYROBP", "HCST", "CST7", "NKG7", "CCL5", "GZMA", "CTSW", "GZMM", "HOPX", "CCL4", "KLRD1", "GNLY", "FGFBP2", "GZMH", "NFKBIA", "JUNB", "TNFAIP3", "FOS", "DUSP1", "DDIT4", "FTH1", "ZFP36L2", "LINC02446", "PELI1", "SOX4", "GZMK", "HLA-DMA", "HLA-DQB1", "HLA-DPA1", "HLA-DPB1", "HLA-DRA", "HLA-DRB1", "HLA-DQA1", "CD74", "TXN", "COTL1", "CRIP1", "CD52", "S100A4", "B2M", "PCNA","PCLAF", "TYMS", "STMN1", "DUT", "DEK", "TUBA1B", "TUBB", "HMGN1", "H2AFY", "ANP32B", "NASP", "VIM", "TRDV1", "TRDV3")
+
+## add MK167 and BIRC5 to mark the cycling population
+cd3_others<- c("IFIT1", "HERC5", "IL17A", "IFNGR1", "IFNGR2", "EPHB6", "MKI67", "BIRC5")
+
+# TIM3 is HAVCR2, IL7R is CD127
+cd3_others2<- c("CD3E", "TCF7", "ZEB2", "CCR6", "KLRC1", "DUSP2", "CD69", "CXCR3", "GPR183", "IL7R", "CXCL13", "HAVCR2", "TIGIT", "CXCR5")
+
+## genes to remove
+cd3_remove<- c("IL17A", "B3GAT1", "TRBV24-1", "TRAV1-2", "TRAV16", "TRAV12-1", "TRBV11-3",
+               "TRBV21-1")
+cd3_genes<- c(cd3_genes, cd3_others, cd3_others2) %>% unique()
+cd3_genes<- setdiff(cd3_genes, cd3_remove)
+
+cd8_minus_annotation<- 
+  select(cd8_minus_annotated@meta.data, seurat_clusters, annotation, clusters_anno_sub) %>%
+  distinct() 
+
+## make it as a factor, otherwise 7a and 7b order can be random in the matrix column name
+cd8_minus_annotated$clusters_anno_sub<- factor(cd8_minus_annotated$clusters_anno_sub,
+                                               levels = sort(unique(cd8_minus_annotated$clusters_anno_sub)))
+
+clusters<- cd8_minus_annotated$clusters_anno_sub%>%unique()
+cd3_cells<- cd8_minus_annotated$clusters_anno_sub %in% clusters
+cd3_mats_all<- GetMatrixFromSeurat(obj = cd8_minus_annotated[, cd3_cells], features = cd3_genes,
+                                   group.by= "clusters_anno_sub")
+
+cd3_cells_health<- cd8_minus_annotated_health$clusters_anno_sub %in% clusters
+cd3_mats_health<- GetMatrixFromSeurat(obj = cd8_minus_annotated_health[, cd3_cells_health], features = cd3_genes, group.by= "clusters_anno_sub" )
+
+
+cd3_cells_no_health<- cd8_minus_annotated_no_health$clusters_anno_sub %in% clusters
+cd3_mats_no_health<- GetMatrixFromSeurat(obj = cd8_minus_annotated_no_health[, cd3_cells_no_health], features = cd3_genes, group.by= "clusters_anno_sub" )
+
+
+library(Polychrome)
+#annotation_colors<- kelly.colors(length(unique(cd8_minus_annotation$annotation))) %>%
+  #unname()
+
+### this is the same hex color as in the BBrowser.
+annotation_colors<- c("#3366cc", "#974b5d", "#e24b0e", "#f78402", "#a59709", "#179616", "#5d4160", "#8117a0", "#8117a0", "#2672ba", "#4c7aaa", "#cf497b", "#9d7a37", "#709a04", "#9f5024", "#8d3e4e", "#3d5e8a", "#655397", "#8d4e99", "#468a99", "#48aa72", "#99a923", "#8a7066", "#6d37bf", "#ba5d46", "#cf5800")
+
+
+
+cd3_anno<- colnames(cd3_mats_health$exp_mat)
+
+### now the order is the same!
+all.equal(colnames(cd3_mats_health$exp_mat), colnames(cd3_mats_no_health$exp_mat))
+all.equal(colnames(cd3_mats_all$exp_mat), colnames(cd3_mats_no_health$exp_mat))
+         
+
+column_ha1<- HeatmapAnnotation(
+    cluster_anno = cd3_anno,
+    col = list(cluster_anno = setNames(annotation_colors, cd3_anno)),
+    na_col = "grey",
+    show_annotation_name = FALSE
+)
+
+
+column_ha2<- HeatmapAnnotation(
+    cluster_anno = cd3_anno,
+    col = list(cluster_anno = setNames(annotation_colors, cd3_anno)),
+    na_col = "grey",
+    show_annotation_name = TRUE
+)
+
+draw(column_ha1 %v% column_ha2)
+
+## legend for the dot size
+lgd_list = list(
+    Legend( labels = c(0, 10, 25, 50 , 75, 100), title = "percentage",
+            graphics = list(
+              function(x, y, w, h) grid.circle(x = x, y = y, r = 0  * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.1)  * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.25) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.5) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.75) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = 1 * unit(2, "mm"),
+                                               gp = gpar(fill = "black")))
+            ))
+  
+  
+col_fun<-  circlize::colorRamp2(c(-1, 0, 2), c("#440154FF", "#238A8DFF", "#FDE725FF"))
+```
+
+
+When all the cells have 0 expression, `scale` will give NaN.  e.g., CD8A,CD8B
+```{r}
+scale2<- function(y) (y - mean(y)) / sd(y) ^ as.logical(sd(y))
+# https://stackoverflow.com/questions/15363610/why-does-scale-return-nan-for-zero-variance-columns
+
+```
+
+plot the clustered dotplot by groups
+
+```{r}
+set.seed(123)  
+
+#### scale across different groups
+
+cd3_mats_combine<- cbind(cd3_mats_no_health$exp_mat, cd3_mats_health$exp_mat, cd3_mats_all$exp_mat)
+cd3_mats_combine_scaled<- t(apply(cd3_mats_combine, 1, scale2))
+
+ncol(cd3_mats_no_health$exp_mat)
+cd3_mats_no_health_scaled<-  cd3_mats_combine_scaled[, 1:26]
+cd3_mats_health_scaled<-  cd3_mats_combine_scaled[, 27:52]
+cd3_mats_all_scaled<-  cd3_mats_combine_scaled[, 53:78] 
+
+
+set.seed(123)  
+pdf(here("results/figures/2022_08_02_cd3_plus_cd8_minus_cells_health_vs_RR_and_all_scale_across_dotplot_complexheatmap_subcluster7_bbrowser_color.pdf"), width = 18, height = 18)
+cd3_hp1<- MakeClusterDotPlot(exp_mat = cd3_mats_no_health_scaled, 
+                   percent_mat = cd3_mats_no_health$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "cHLs",
+                   column_title_side = "bottom",
+                   row_km = 6,
+                   row_names_font_size = 8, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"),
+                   show_row_dend =FALSE,
+                   show_column_dend = FALSE,
+                   column_names_side = "top")
+                   #column_labels = paste0(str_pad(colnames(cd3_mats_no_health_scaled), width = 2, side = "left", pad = "0"), "_", cd3_anno) 
+                     
+
+cd3_hp2<- MakeClusterDotPlot(exp_mat = cd3_mats_health_scaled, 
+                   percent_mat = cd3_mats_health$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "healthy donors",
+                   column_title_side = "bottom",
+                   row_km = 6,
+                   row_names_font_size = 8, 
+                   column_ha = column_ha1,
+                   legend_dot_size = unit(2, "mm"),
+                   row_order = row_order(cd3_hp1) %>% unlist(use.names = FALSE),
+                   column_order = column_order(cd3_hp1),
+                   column_names_side = "top")
+                   #column_labels = paste0(str_pad(colnames(cd3_mats_health_scaled), width = 2, side = "left", pad = "0"), "_", cd3_anno) )
+
+cd3_hp<- MakeClusterDotPlot(exp_mat = cd3_mats_all_scaled, 
+                   percent_mat = cd3_mats_all$percent_mat, 
+                   col_fun = col_fun,
+                   column_title = "all",
+                   column_title_side = "bottom",
+                   row_km = 6,
+                   row_names_font_size = 8, 
+                   column_ha = column_ha2,
+                   legend_dot_size = unit(2, "mm"),
+                   row_order = row_order(cd3_hp1) %>% unlist(use.names = FALSE),
+                   column_order = column_order(cd3_hp1),
+                   column_names_side = "top")
+                   #column_labels = paste0(str_pad(colnames(cd3_mats_all_scaled), width = 2, side = "left", pad = "0"), "_", cd3_anno) )
+
+draw(cd3_hp1 + cd3_hp2 + cd3_hp , annotation_legend_list = lgd_list, ht_gap = unit(1, "cm") )
+dev.off()
+
+
+## only all cells
+pdf(here("results/figures/2022_08_02_cd3_plus_cd8_minus_all_cells_scale_across_dotplot_complexheatmap_subcluster7_bbrowser_color.pdf"), width = 10, height = 18)
+draw(cd3_hp)
+
+dev.off()
+```
+
+
+### dotplot split by group
+
+Relate to Main Figure2c:
+
+New dot plot as shown below, for all groups HD, ND, CR, PR, PD at C1D1 and CR, PR, PD at C4D1, please keep gene order: CCR7, SELL (CD62L), TCF7, S100A4, CD69, please prepare this in two versions:
+
+
+-	First for all naïve cells together (0+1+9+11+12+15+18+21+24), by groups:
+
+: CCR7, SELL (CD62L), TCF7, S100A4, CD69
+
+keep only the naive clusters and merge all naive cells together 
+
+```{r}
+GetMatrixFromSeuratByGroup1<- function(obj, features){
+  exp_mat<- obj@assays$RNA@data[features, ]
+  count_mat<- obj@assays$RNA@counts[features, ]
+  
+  meta<- obj@meta.data %>%
+  tibble::rownames_to_column(var = "cell")
+
+  exp_df<- as.matrix(exp_mat) %>% as.data.frame() %>% 
+    tibble::rownames_to_column(var="gene") %>%
+    tidyr::pivot_longer(!gene, names_to = "cell", values_to = "expression") %>%
+    left_join(meta) %>%
+    group_by(gene, group) %>%
+    summarise(average_expression = mean(expression)) %>%
+    tidyr::pivot_wider(names_from = group, values_from= average_expression) 
+  
+  exp_mat<- exp_df[, -1] %>% as.matrix()
+  rownames(exp_mat)<- exp_df %>% pull(gene)
+  
+  count_df<- as.matrix(count_mat) %>% as.data.frame() %>% 
+    tibble::rownames_to_column(var="gene") %>%
+    tidyr::pivot_longer(!gene, names_to = "cell", values_to = "count") %>%
+    left_join(meta) %>%
+    group_by(gene, group) %>%
+    summarise(percentage = mean(count >0)) %>%
+    tidyr::pivot_wider(names_from = group, values_from= percentage) 
+
+  percent_mat<- count_df[, -1] %>% as.matrix()
+  rownames(percent_mat)<- count_df %>% pull(gene)
+  if (!identical(dim(exp_mat), dim(percent_mat))) {
+    stop("the dimension of the two matrice should be the same!")
+  }
+  
+  if(! all.equal(colnames(exp_mat), colnames(percent_mat))) {
+    stop("column names of the two matrice should be the same!")
+  }
+  
+  if(! all.equal(rownames(exp_mat), rownames(percent_mat))) {
+    stop("column names of the two matrice should be the same!")
+  }
+  return(list(exp_mat = exp_mat, percent_mat = percent_mat))
+}
+```
+
+```{r}
+cd8_minus_naive<- cd8_minus_annotated$seurat_clusters %in% c(0,1,9,11,12,15,18,21,24)
+
+naive_features<- c("CCR7", "SELL", "TCF7", "S100A4", "CD69")
+
+cd8_minus_naive_mat<- GetMatrixFromSeuratByGroup1(obj = cd8_minus_annotated[, cd8_minus_naive], features = naive_features)
+
+# reorder by the genes order we want
+cd8_minus_naive_mat$exp_mat<- cd8_minus_naive_mat$exp_mat[naive_features, ]
+
+cd8_minus_naive_mat$percent_mat<- cd8_minus_naive_mat$percent_mat[naive_features, ]
+
+### plotting
+group_anno<- colnames(cd8_minus_naive_mat$exp_mat)
+
+#https://stackoverflow.com/questions/8197559/emulate-ggplot2-default-color-palette
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+
+group_colors<- gg_color_hue(n=8)
+
+column_ha3<- HeatmapAnnotation(
+    group_anno = group_anno,
+    col = list(group_anno = setNames(group_colors, group_anno)),
+    na_col = "grey",
+    show_annotation_name = FALSE
+)
+
+
+quantile(t(scale(t(cd8_minus_naive_mat$exp_mat))), c(0,0.1,0.5, 0.8, 0.9, 0.95, 1))
+
+col_fun3<-  circlize::colorRamp2(c(-2, 0, 1), c("#440154FF", "#238A8DFF", "#FDE725FF"))
+
+
+set.seed(123)  
+pdf(here("results/figures/2021_11_05_cd3_plus_cd8_minus_cells_all_naive_by_group_v2.pdf"), width = 6, height = 4)
+## percent_mat need to *100, the percent_mat got from DotPlot from Seurat *100 already.
+cd8_minus_naive_hp<- MakeClusterDotPlot(exp_mat = t(scale(t(cd8_minus_naive_mat$exp_mat))), 
+                   percent_mat = cd8_minus_naive_mat$percent_mat*100, 
+                   col_fun = col_fun3,
+                   row_km = NULL,
+                   column_title = "all naive",
+                   column_title_side = "top",
+                   row_names_font_size = 8, 
+                   column_ha = column_ha3,
+                   legend_dot_size = unit(2, "mm"),
+                   show_row_dend =FALSE,
+                   cluster_rows =FALSE,
+                   show_column_dend = FALSE,
+                   cluster_columns =FALSE,
+                   column_names_side = "bottom")
+
+draw(cd8_minus_naive_hp , annotation_legend_list = lgd_list)
+dev.off()
+```
+
+
+-	And then the same but for each naïve cluster separately (0, 1, 9, 11, 12, 15, 18, 21, 24), 
+
+Relate to Suppl Figure 7
+```{r}
+GetMatrixFromSeuratByGroup<- function(obj, features){
+  exp_mat<- obj@assays$RNA@data[features, ]
+  count_mat<- obj@assays$RNA@counts[features, ]
+  
+  meta<- obj@meta.data %>%
+  tibble::rownames_to_column(var = "cell")
+
+  exp_df<- as.matrix(exp_mat) %>% as.data.frame() %>% 
+    tibble::rownames_to_column(var="gene") %>%
+    tidyr::pivot_longer(!gene, names_to = "cell", values_to = "expression") %>%
+    left_join(meta) %>%
+    group_by(gene, clusters_anno_sub, group) %>%
+    summarise(average_expression = mean(expression)) %>%
+    tidyr::pivot_wider(names_from = c(clusters_anno_sub, group), values_from= average_expression) 
+  
+  exp_mat<- exp_df[, -1] %>% as.matrix()
+  rownames(exp_mat)<- exp_df %>% pull(gene)
+  
+  count_df<- as.matrix(count_mat) %>% as.data.frame() %>% 
+    tibble::rownames_to_column(var="gene") %>%
+    tidyr::pivot_longer(!gene, names_to = "cell", values_to = "count") %>%
+    left_join(meta) %>%
+    group_by(gene, clusters_anno_sub, group) %>%
+    summarise(percentage = mean(count >0)) %>%
+    tidyr::pivot_wider(names_from = c(clusters_anno_sub, group), values_from= percentage) 
+
+  percent_mat<- count_df[, -1] %>% as.matrix()
+  rownames(percent_mat)<- count_df %>% pull(gene)
+  if (!identical(dim(exp_mat), dim(percent_mat))) {
+    stop("the dimension of the two matrice should be the same!")
+  }
+  
+  if(! all.equal(colnames(exp_mat), colnames(percent_mat))) {
+    stop("column names of the two matrice should be the same!")
+  }
+  
+  if(! all.equal(rownames(exp_mat), rownames(percent_mat))) {
+    stop("column names of the two matrice should be the same!")
+  }
+  return(list(exp_mat = exp_mat, percent_mat = percent_mat))
+}
+
+```
+
+
+```{r}
+cd8_minus_naive_mats<- GetMatrixFromSeuratByGroup(obj = cd8_minus_annotated[, cd8_minus_naive], features = naive_features )
+
+# reorder by the genes order we want
+cd8_minus_naive_mats$exp_mat<- cd8_minus_naive_mats$exp_mat[naive_features, ]
+
+cd8_minus_naive_mats$percent_mat<- cd8_minus_naive_mats$percent_mat[naive_features, ]
+
+
+col_index<- seq(from = 8, to = 72, by = 8)
+cluster_ids<- c(0, 1, 9, 11, 12, 15, 18, 21, 24)
+
+for (i in seq_along(col_index)){
+  cluster_id<- cluster_ids[i]
+  end<- col_index[i]
+  start<-  end - 7
+  exp_mat_scaled<- t(scale(t(cd8_minus_naive_mats$exp_mat[, start:end])))
+  dim(exp_mat_scaled)
+  percent_mat<- cd8_minus_naive_mats$percent_mat * 100
+  
+  set.seed(123)
+  pdf(here(glue::glue("results/figures/2021_11_05_cd3_plus_cd8_minus_cells_naive_by_cluster_{cluster_id}_by_group.pdf")), width = 6, height = 4)
+  hp<- MakeClusterDotPlot(exp_mat = exp_mat_scaled, 
+                   percent_mat = percent_mat, 
+                   col_fun = col_fun3,
+                   row_km = NULL,
+                   row_names_font_size = 8, 
+                   column_title = glue::glue("cluster {cluster_id}"),
+                   column_ha = NULL,
+                   legend_dot_size = unit(2, "mm"),
+                   show_row_dend =FALSE,
+                   cluster_rows =FALSE,
+                   show_column_dend = FALSE,
+                   cluster_columns =FALSE,
+                   column_names_side = "bottom")
+  draw(hp , annotation_legend_list = lgd_list)
+  dev.off()
+  
+}
+
+
+```
+
+
+### New dot plot for exhaustion markers
+
+
+Please do it for all cells together and display by clusters: 
+
+Cluster order: 0, 1, 9, 11,  15, 12, 18, 21, 24, 2, 3, 6, 10, 17, 5, 20, 22, 7b, 23, 13, 16, 7a, 4, 8, 14, 19 
+
+
+Could you please prepare that in two versions?
+
+The first will be for:
+
+PDCD1
+CTLA4
+LAG3
+TIGIT
+
+Second for:
+PDCD1
+CTLA4
+LAG3
+TIGIT
+TIM3
+
+```{r}
+cluster_exhaustion_order<- c("00", "01", "09", 11,  15, 12, 18, 21, 24, "02", "03", "06", 10, 17, "05", 20, 22, "07_b", 23, 13, 16, "07_a", "04", "08", 14, 19)
+
+cluster_exhaustion_order2<- unname(new_annotations) %>%
+  enframe() %>%
+  mutate(cluster_id = str_replace(value, "([0-9]+_[ab]?).+", "\\1")) %>%
+  mutate(cluster_id = str_replace(cluster_id, "_$", ""))
+  
+cluster_exhaustion_order<- tibble(cluster_id = cluster_exhaustion_order) %>%
+  left_join(cluster_exhaustion_order2) %>%
+  pull(value)
+
+
+exhaustion_features<- c("PDCD1", "CTLA4", "LAG3", "TIGIT")
+exhaustion_features<- c("PDCD1", "CTLA4", "LAG3", "TIGIT", "HAVCR2")
+
+cd8_minus_exhaust_mat<- GetMatrixFromSeurat(obj = cd8_minus_annotated, features = exhaustion_features, group.by = "clusters_anno_sub")
+
+cd8_minus_exhaust_mat$exp_mat<- cd8_minus_exhaust_mat$exp_mat[exhaustion_features, cluster_exhaustion_order]
+
+cd8_minus_exhaust_mat$percent_mat<- cd8_minus_exhaust_mat$percent_mat[exhaustion_features, cluster_exhaustion_order]
+
+quantile(t(scale(t(cd8_minus_exhaust_mat$exp_mat))), c(0,0.1,0.5, 0.8, 0.9, 0.95, 1))
+
+col_fun4<-  circlize::colorRamp2(c(-1, 0, 2), c("#440154FF", "#238A8DFF", "#FDE725FF"))
+
+
+### the max percentage is around 53%, increase the dot size to look better, unit(4, "mm")
+## legend for the dot size
+lgd_list2 = list(
+    Legend( labels = c(0, 10, 25, 50 , 75, 100), title = "percentage",
+            row_gap = unit(1.5, "mm"),
+            graphics = list(
+              function(x, y, w, h) grid.circle(x = x, y = y, r = 0  * unit(3, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.1)  * unit(3, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.25) * unit(3, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.5) * unit(3, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.75) * unit(3, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = 1 * unit(3, "mm"),
+                                               gp = gpar(fill = "black")))
+            ))
+
+
+column_ha4<- HeatmapAnnotation(
+    cluster_anno = cd3_anno,
+    col = list(cluster_anno = setNames(annotation_colors, cd3_anno)),
+    na_col = "grey",
+    show_annotation_name = TRUE,
+    show_legend = FALSE
+)
+
+
+pdf(here("results/figures/2021_11_06_cd3_plus_cd8_minus_cells_exhaustion_by_cluster_v4.pdf"),
+    width = 6, height = 3)
+
+exhaustion_hp<- MakeClusterDotPlot(exp_mat = t(scale(t(cd8_minus_exhaust_mat$exp_mat))), 
+                   percent_mat = cd8_minus_exhaust_mat$percent_mat, 
+                   col_fun = col_fun4,
+                   column_title = "exhaustion",
+                   column_title_side = "top",
+                   row_km = NULL,
+                   cluster_rows =FALSE,
+                   cluster_columns = FALSE,
+                   row_names_font_size = 8, 
+                   column_ha = column_ha4,
+                   legend_dot_size = unit(3, "mm"),
+                   column_names_side = "bottom",
+                   column_names_gp = gpar(fontsize = 8))
+
+draw(exhaustion_hp , annotation_legend_list = lgd_list2)
+dev.off()
+```
+
+### replot the whole CD8 minus space using 
+
+Relate to Main Figure 2h
+
+HLA-DRA, LGALS1, LAG3, IL2RA, FOXP3, CTLA4, BIRC5 and Ki67
+
+```{r}
+cd3_features<- c("HLA-DRA", "LGALS1", "LAG3", "IL2RA", "FOXP3", "CTLA4", "BIRC5", "MKI67")
+
+cd8_minus_exhaust_mat<- GetMatrixFromSeurat(obj = cd8_minus_annotated, features = cd3_features, group.by = "clusters_anno_sub")
+
+
+quantile(t(scale(t(cd8_minus_exhaust_mat$exp_mat))), c(0,0.1,0.5, 0.8, 0.9, 0.95, 1))
+
+col_fun4<-  circlize::colorRamp2(c(-1, 0, 2), c("#440154FF", "#238A8DFF", "#FDE725FF"))
+
+
+### the max percentage is around 53%, increase the dot size to look better, unit(4, "mm")
+## legend for the dot size
+lgd_list2 = list(
+    Legend( labels = c(0, 10, 25, 50 , 75, 100), title = "percentage",
+            row_gap = unit(1.5, "mm"),
+            graphics = list(
+              function(x, y, w, h) grid.circle(x = x, y = y, r = 0  * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.1)  * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.25) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.5) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = sqrt(0.75) * unit(2, "mm"),
+                                               gp = gpar(fill = "black")),
+              function(x, y, w, h) grid.circle(x = x, y = y, r = 1 * unit(3, "mm"),
+                                               gp = gpar(fill = "black")))
+            ))
+
+
+column_ha4<- HeatmapAnnotation(
+    cluster_anno = cd3_anno,
+    col = list(cluster_anno = setNames(annotation_colors, cd3_anno)),
+    na_col = "grey",
+    show_annotation_name = TRUE,
+    show_legend = FALSE
+)
+
+
+pdf(here("results/figures/2022_08_18_cd3_plus_cd8_minus_cells_IL10_IL32_IL12A_EBI3_by_cluster_v4.pdf"),
+    width = 6, height = 5)
+
+exhaustion_hp<- MakeClusterDotPlot(exp_mat = t(scale(t(cd8_minus_exhaust_mat$exp_mat))), 
+                   percent_mat = cd8_minus_exhaust_mat$percent_mat, 
+                   col_fun = col_fun4,
+                   column_title = "exhaustion and cycling",
+                   column_title_side = "top",
+                   row_km = NULL,
+                   cluster_rows =TRUE,
+                   cluster_columns = TRUE,
+                   row_names_font_size = 8, 
+                   column_ha = column_ha4,
+                   legend_dot_size = unit(2, "mm"),
+                   column_names_side = "bottom",
+                   column_names_gp = gpar(fontsize = 8))
+
+draw(exhaustion_hp , annotation_legend_list = lgd_list2)
+dev.off()
+```
+
+
+
